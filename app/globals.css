@@ -1,26 +1,69 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --color-forest: #0b3d2e;
+  --color-forest-dark: #072b21;
+
+  --color-gold: #d4af37;
+  --color-gold-light: #e7c75c;
+
+  --color-navy: #071a2f;
+  --color-navy-light: #0d2744;
+
+  --color-beige: #f2e8d5;
+  --color-offwhite: #f7f7f2;
+
+  --color-success: #22c55e;
+  --color-danger: #ef4444;
+
+  --background: #06120f;
+  --foreground: #f7f7f2;
+
+  --card-bg: rgba(7, 26, 47, 0.72);
+  --card-border: rgba(212, 175, 55, 0.18);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+* {
+  box-sizing: border-box;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  scroll-behavior: smooth;
 }
 
 body {
-  background: var(--background);
+  margin: 0;
+  min-height: 100vh;
+  background:
+    radial-gradient(
+      circle at top right,
+      rgba(11, 61, 46, 0.45),
+      transparent 35%
+    ),
+    radial-gradient(
+      circle at bottom left,
+      rgba(7, 26, 47, 0.65),
+      transparent 40%
+    ),
+    var(--background);
+
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+::selection {
+  background: var(--color-gold);
+  color: var(--color-navy);
 }
