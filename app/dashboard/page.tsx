@@ -1,7 +1,7 @@
 ﻿import Link from "next/link";
 import { redirect } from "next/navigation";
 import { createClient } from "@/src/lib/supabase/server";
-import LogoutButton from "@/src/components/auth/LogoutButton";
+import ProfileMenu from "@/src/components/dashboard/ProfileMenu";
 
 export default async function DashboardPage() {
   const supabase = await createClient();
@@ -256,23 +256,14 @@ export default async function DashboardPage() {
               </p>
             </div>
 
-            <div className="flex items-center gap-3">
-              <div className="hidden text-right sm:block">
-                <p className="text-sm font-medium">
-                  {displayName}
-                </p>
-
-                <p className="mt-1 max-w-[220px] truncate text-[11px] text-white/30">
-                  {user.email}
-                </p>
-              </div>
-
-              <div className="flex h-10 w-10 items-center justify-center rounded-full border border-[#D4AF37]/30 bg-gradient-to-br from-[#D4AF37] to-[#A98517] text-sm font-bold text-[#06120F]">
-                {firstInitial}
-              </div>
-
-              <LogoutButton />
-            </div>
+        <div className="flex items-center gap-3">
+  <ProfileMenu
+    displayName={displayName}
+    email={user.email ?? ""}
+    firstInitial={firstInitial}
+    accountStatus={accountStatus}
+  />
+</div>
           </div>
         </header>
 
