@@ -1,0 +1,4 @@
+MetaTrader5==5.0.6162
+numpy==2.5.2
+supabase==2.31.0
+cryptography==50.0.1

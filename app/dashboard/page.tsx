@@ -2,6 +2,7 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/src/lib/supabase/server";
 import ProfileMenu from "@/src/components/dashboard/ProfileMenu";
+import TradingControl from "@/src/components/dashboard/TradingControl";
 
 export default async function DashboardPage() {
   const supabase = await createClient();
@@ -335,146 +336,11 @@ export default async function DashboardPage() {
           </section>
 
           {/* ================================================= */}
-          {/* TOP STATUS CARDS */}
+          {/* LIVE TRADING CONTROL */}
           {/* ================================================= */}
 
-          <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <DashboardMetricCard
-              label="Subscription"
-              value="No active plan"
-              description="Choose a plan to activate trading access."
-              icon="$"
-              status="Inactive"
-            />
-
-            <DashboardMetricCard
-              label="MT5 Account"
-              value="Not connected"
-              description="No trading account is currently linked."
-              icon="MT5"
-              status="Disconnected"
-            />
-
-            <DashboardMetricCard
-              label="TradeLogic"
-              value="Stopped"
-              description="Automation has not started."
-              icon="G"
-              status="Offline"
-            />
-
-            <DashboardMetricCard
-              label="Trading Cycle"
-              value="Not started"
-              description="Cycle data appears after activation."
-              icon="%"
-              status="Waiting"
-            />
-          </section>
-
-          {/* ================================================= */}
-          {/* MAIN GRID */}
-          {/* ================================================= */}
-
-          <section className="mt-6 grid gap-6 2xl:grid-cols-[1.45fr_0.75fr]">
-            {/* Setup panel */}
-
-            <div className="rounded-[26px] border border-white/[0.08] bg-[#061711]/72 p-6 shadow-[0_22px_65px_rgba(0,0,0,0.2)] backdrop-blur-xl">
-              <div className="flex flex-col gap-4 border-b border-white/[0.07] pb-5 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <p className="text-lg font-semibold">
-                    Complete your setup
-                  </p>
-
-                  <p className="mt-1 text-sm text-white/35">
-                    Three steps are required before
-                    automated trading becomes available.
-                  </p>
-                </div>
-
-                <span className="w-fit rounded-full border border-[#D4AF37]/20 bg-[#D4AF37]/[0.07] px-3 py-1.5 text-[11px] font-semibold text-[#D4AF37]">
-                  0 of 3 complete
-                </span>
-              </div>
-
-              <div className="mt-6 space-y-3">
-                <SetupStep
-                  number="1"
-                  title="Choose your subscription"
-                  description="Select Beginner, Intermediate or Advanced."
-                  active
-                  action="View plans"
-                />
-
-                <SetupStep
-                  number="2"
-                  title="Connect your MT5 account"
-                  description="Add your broker, server and MT5 credentials."
-                />
-
-                <SetupStep
-                  number="3"
-                  title="Start TradeLogic"
-                  description="Activate automated trading after eligibility checks."
-                />
-              </div>
-
-              {/* Decorative performance graph */}
-
-              <div className="mt-6 overflow-hidden rounded-2xl border border-white/[0.07] bg-[#03100C]/55 p-5">
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <p className="text-sm font-semibold">
-                      Trading performance
-                    </p>
-
-                    <p className="mt-1 text-xs text-white/30">
-                      Performance will populate when your
-                      first trading cycle begins.
-                    </p>
-                  </div>
-
-                  <span className="rounded-lg border border-white/[0.07] bg-white/[0.03] px-3 py-1.5 text-[10px] text-white/30">
-                    No data
-                  </span>
-                </div>
-
-                <div className="relative mt-5 h-48 overflow-hidden rounded-xl border border-white/[0.05] bg-[#04110D]/60">
-                  <div className="performance-grid absolute inset-0 opacity-[0.15]" />
-
-                  <svg
-                    viewBox="0 0 800 200"
-                    preserveAspectRatio="none"
-                    className="absolute inset-0 h-full w-full opacity-[0.28]"
-                  >
-                    <path
-                      d="M0 155 C80 160 115 142 160 145 C210 150 245 123 290 128 C345 135 370 103 420 108 C475 114 510 90 555 94 C610 99 645 67 690 73 C735 79 765 50 800 45"
-                      fill="none"
-                      stroke="#D4AF37"
-                      strokeWidth="2"
-                    />
-
-                    <path
-                      d="M0 185 C75 177 118 181 165 168 C210 157 260 164 305 145 C350 126 390 140 435 120 C480 102 530 115 575 91 C625 65 665 84 710 61 C750 42 775 38 800 28"
-                      fill="none"
-                      stroke="#22C55E"
-                      strokeWidth="1.5"
-                    />
-                  </svg>
-
-                  <div className="absolute inset-0 flex items-center justify-center">
-                    <div className="rounded-xl border border-white/[0.07] bg-[#04110D]/80 px-4 py-2 backdrop-blur-xl">
-                      <p className="text-xs font-medium text-white/35">
-                        Awaiting first trading cycle
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* Account panel */}
-
+          <TradingControl
+            accountPanel={
             <aside className="rounded-[26px] border border-white/[0.08] bg-[#061711]/72 p-6 shadow-[0_22px_65px_rgba(0,0,0,0.2)] backdrop-blur-xl">
               <div className="flex items-center justify-between">
                 <div>
@@ -535,7 +401,8 @@ export default async function DashboardPage() {
                 </p>
               </div>
             </aside>
-          </section>
+            }
+          />
 
           {/* ================================================= */}
           {/* ACTIVITY */}
@@ -634,40 +501,6 @@ export default async function DashboardPage() {
                   value="100%"
                 />
               </div>
-            </div>
-          </section>
-
-          {/* Bottom banner */}
-
-          <section className="relative mt-6 overflow-hidden rounded-[26px] border border-[#D4AF37]/25 bg-[#061711]/80 p-6 sm:p-7">
-            <div className="absolute right-0 top-1/2 h-72 w-72 -translate-y-1/2 rounded-full bg-[#D4AF37]/[0.07] blur-[80px]" />
-
-            <div className="relative flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-              <div className="flex items-start gap-4">
-                <div className="flex h-13 w-13 shrink-0 items-center justify-center rounded-2xl border border-[#D4AF37]/30 bg-[#D4AF37]/10 px-4 py-3 text-lg font-bold text-[#D4AF37]">
-                  G
-                </div>
-
-                <div>
-                  <p className="text-lg font-semibold">
-                    Prepare TradeLogic for trading
-                  </p>
-
-                  <p className="mt-2 max-w-2xl text-xs leading-5 text-white/35">
-                    Activate your subscription, connect
-                    your supported MT5 account and complete
-                    the required eligibility checks before
-                    starting automated trading.
-                  </p>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                className="w-fit rounded-xl bg-gradient-to-r from-[#D4AF37] via-[#E7C75C] to-[#D4AF37] px-6 py-3 text-xs font-bold text-[#06120F] shadow-[0_12px_35px_rgba(212,175,55,0.13)] transition hover:brightness-110"
-              >
-                Complete setup â†’
-              </button>
             </div>
           </section>
 
@@ -805,109 +638,6 @@ function SidebarItem({
 
       {label}
     </Link>
-  );
-}
-
-function DashboardMetricCard({
-  label,
-  value,
-  description,
-  icon,
-  status,
-}: {
-  label: string;
-  value: string;
-  description: string;
-  icon: string;
-  status: string;
-}) {
-  return (
-    <div className="group relative overflow-hidden rounded-[22px] border border-white/[0.08] bg-[#061711]/72 p-5 shadow-[0_18px_50px_rgba(0,0,0,0.18)] backdrop-blur-xl transition hover:-translate-y-0.5 hover:border-[#D4AF37]/20">
-      <div className="absolute -right-8 -top-10 h-28 w-28 rounded-full bg-[#D4AF37]/[0.035] blur-2xl transition group-hover:bg-[#D4AF37]/[0.06]" />
-
-      <div className="relative">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <p className="text-[10px] font-medium uppercase tracking-[0.14em] text-white/28">
-              {label}
-            </p>
-
-            <p className="mt-3 text-xl font-semibold">
-              {value}
-            </p>
-          </div>
-
-          <div className="flex h-10 min-w-10 items-center justify-center rounded-xl border border-[#D4AF37]/15 bg-[#D4AF37]/[0.055] px-2 text-[10px] font-bold text-[#D4AF37]">
-            {icon}
-          </div>
-        </div>
-
-        <div className="mt-4 flex items-center gap-2">
-          <span className="h-1.5 w-1.5 rounded-full bg-white/25" />
-
-          <span className="text-[10px] font-medium text-white/32">
-            {status}
-          </span>
-        </div>
-
-        <p className="mt-3 text-[11px] leading-5 text-white/28">
-          {description}
-        </p>
-      </div>
-    </div>
-  );
-}
-
-function SetupStep({
-  number,
-  title,
-  description,
-  active = false,
-  action,
-}: {
-  number: string;
-  title: string;
-  description: string;
-  active?: boolean;
-  action?: string;
-}) {
-  return (
-    <div
-      className={`flex items-center gap-4 rounded-2xl border p-4 transition ${
-        active
-          ? "border-[#D4AF37]/18 bg-[#D4AF37]/[0.045]"
-          : "border-white/[0.07] bg-white/[0.018]"
-      }`}
-    >
-      <div
-        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full border text-sm font-semibold ${
-          active
-            ? "border-[#D4AF37]/35 bg-[#D4AF37]/10 text-[#D4AF37]"
-            : "border-white/[0.08] bg-white/[0.025] text-white/30"
-        }`}
-      >
-        {number}
-      </div>
-
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold">
-          {title}
-        </p>
-
-        <p className="mt-1 text-[11px] leading-5 text-white/30">
-          {description}
-        </p>
-      </div>
-
-      {action && (
-        <button
-          type="button"
-          className="hidden rounded-xl bg-[#D4AF37] px-4 py-2.5 text-[11px] font-semibold text-[#06120F] transition hover:bg-[#E7C75C] sm:block"
-        >
-          {action}
-        </button>
-      )}
-    </div>
   );
 }
 
