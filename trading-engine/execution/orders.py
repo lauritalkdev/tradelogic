@@ -311,17 +311,17 @@ def open_market_position(
             "Symbol is required."
         )
 
-    ensure_symbol_selected(
+    broker_symbol = ensure_symbol_selected(
         clean_symbol
     )
 
     _validate_volume(
-        symbol=clean_symbol,
+        symbol=broker_symbol,
         volume=volume,
     )
 
     tick = mt5.symbol_info_tick(
-        clean_symbol
+        broker_symbol
     )
 
     if tick is None:
@@ -366,23 +366,23 @@ def open_market_position(
         )
 
     normalized_price = _normalize_price(
-        symbol=clean_symbol,
+        symbol=broker_symbol,
         price=entry_price,
     )
 
     normalized_sl = _normalize_price(
-        symbol=clean_symbol,
+        symbol=broker_symbol,
         price=stop_loss,
     )
 
     normalized_tp = _normalize_price(
-        symbol=clean_symbol,
+        symbol=broker_symbol,
         price=take_profit,
     )
 
     request = {
         "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": clean_symbol,
+        "symbol": broker_symbol,
         "volume": float(volume),
         "type": order_type,
         "price": normalized_price,
@@ -393,7 +393,7 @@ def open_market_position(
         "comment": comment,
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": _preferred_filling_mode(
-            clean_symbol
+            broker_symbol
         ),
     }
 
@@ -408,7 +408,7 @@ def open_market_position(
     ):
         _raise_order_failure(
             action="market order",
-            symbol=clean_symbol,
+            symbol=broker_symbol,
             result=result,
         )
 
@@ -432,7 +432,7 @@ def open_market_position(
     return _result_to_execution_result(
         result=result,
         action="open",
-        symbol=clean_symbol,
+        symbol=broker_symbol,
         stop_loss=normalized_sl,
         take_profit=normalized_tp,
         position_ticket=position_ticket,

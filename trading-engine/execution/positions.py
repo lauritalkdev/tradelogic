@@ -9,6 +9,9 @@ Used for:
 - worker restart/recovery
 - locating positions that must continue to be managed
 
+Canonical TradeLogic symbols are resolved to the broker's actual
+MT5 symbols before symbol-specific position comparisons are made.
+
 This module does NOT:
 - open trades
 - modify trades
@@ -26,6 +29,11 @@ from execution.orders import (
     DEFAULT_MAGIC,
     MT5ExecutionError,
     OrderDirection,
+)
+
+from mt5.market import (
+    MT5MarketError,
+    resolve_mt5_symbol,
 )
 
 
@@ -61,6 +69,32 @@ def _position_direction(
     raise MT5ExecutionError(
         f"Unsupported MT5 position type: {mt5_position_type}."
     )
+
+
+def _resolve_position_symbol(
+    symbol: str,
+) -> str:
+    """
+    Resolve a canonical TradeLogic symbol to the broker's actual
+    MT5 symbol while preserving this module's execution error type.
+    """
+    clean_symbol = symbol.strip()
+
+    if not clean_symbol:
+        raise MT5ExecutionError(
+            "Symbol is required."
+        )
+
+    try:
+        return resolve_mt5_symbol(
+            clean_symbol
+        )
+
+    except MT5MarketError as exc:
+        raise MT5ExecutionError(
+            f"Unable to resolve MT5 symbol "
+            f"'{clean_symbol}': {exc}"
+        ) from exc
 
 
 def get_strategy_1_positions(
@@ -141,6 +175,9 @@ def get_strategy_1_position_for_symbol(
 
     Strategy 1 permits only one position per symbol.
 
+    Canonical TradeLogic symbols are resolved to the broker's
+    actual MT5 symbol before comparison.
+
     If more than one matching position somehow exists, execution
     is stopped rather than silently choosing one.
     """
@@ -152,18 +189,24 @@ def get_strategy_1_position_for_symbol(
             "Symbol is required."
         )
 
+    broker_symbol = _resolve_position_symbol(
+        clean_symbol
+    )
+
     matches = [
         position
         for position in get_strategy_1_positions(
             magic=magic
         )
-        if position.symbol == clean_symbol
+        if position.symbol == broker_symbol
     ]
 
     if len(matches) > 1:
         raise MT5ExecutionError(
             f"More than one Strategy 1 position exists for "
-            f"'{clean_symbol}'. Manual investigation is required."
+            f"'{clean_symbol}' "
+            f"(broker symbol '{broker_symbol}'). "
+            "Manual investigation is required."
         )
 
     if not matches:
@@ -196,6 +239,10 @@ def can_open_strategy_1_symbol(
     """
     Check Strategy 1's MT5 position concurrency rules.
 
+    Canonical TradeLogic symbols are resolved to the broker's
+    actual MT5 symbol before checking whether a position already
+    exists for that instrument.
+
     Returns:
         (True, "allowed")
     or:
@@ -207,12 +254,16 @@ def can_open_strategy_1_symbol(
     if not clean_symbol:
         return False, "symbol_required"
 
+    broker_symbol = _resolve_position_symbol(
+        clean_symbol
+    )
+
     positions = get_strategy_1_positions(
         magic=magic
     )
 
     if any(
-        position.symbol == clean_symbol
+        position.symbol == broker_symbol
         for position in positions
     ):
         return False, "symbol_position_already_open"

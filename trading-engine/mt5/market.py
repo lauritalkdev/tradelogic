@@ -2,6 +2,7 @@
 TradeLogic - MetaTrader 5 Market Data
 
 Provides safe access to:
+- broker-aware symbol resolution
 - symbol metadata
 - broker point size
 - tick size and tick value
@@ -89,12 +90,29 @@ def _last_error() -> tuple[int | None, str | None]:
         return None, str(exc)
 
 
-def ensure_symbol_selected(symbol: str) -> None:
+def resolve_mt5_symbol(symbol: str) -> str:
     """
-    Ensure a symbol is visible/selected in MT5 Market Watch.
+    Resolve a canonical TradeLogic symbol to the broker's
+    actual MT5 symbol.
 
-    Some brokers do not expose tick/candle data for a symbol until
-    it has been selected.
+    The canonical Strategy 1 symbols remain broker-independent,
+    for example:
+        XAUUSD
+        EURUSD
+
+    Resolution rules:
+    1. Prefer an exact MT5 symbol match.
+    2. If no exact match exists, search broker symbols whose
+       names begin with the canonical symbol.
+    3. Prefer the shortest matching broker variant.
+    4. Refuse ambiguous equally suitable variants.
+
+    Examples:
+        XAUUSD -> XAUUSD
+        XAUUSD -> XAUUSDm
+        EURUSD -> EURUSDm
+
+    This deliberately does not hard-code a broker suffix.
     """
     clean_symbol = symbol.strip()
 
@@ -103,21 +121,105 @@ def ensure_symbol_selected(symbol: str) -> None:
             "Symbol is required."
         )
 
-    info = mt5.symbol_info(clean_symbol)
+    exact_info = mt5.symbol_info(
+        clean_symbol
+    )
+
+    if exact_info is not None:
+        return clean_symbol
+
+    symbols = mt5.symbols_get()
+
+    if symbols is None:
+        code, message = _last_error()
+
+        raise MT5MarketError(
+            f"Unable to load MT5 symbols while resolving "
+            f"'{clean_symbol}' "
+            f"(code={code}, message={message})."
+        )
+
+    canonical_upper = clean_symbol.upper()
+
+    candidates = [
+        str(item.name)
+        for item in symbols
+        if str(item.name).upper().startswith(
+            canonical_upper
+        )
+    ]
+
+    if not candidates:
+        code, message = _last_error()
+
+        raise MT5MarketError(
+            f"MT5 symbol '{clean_symbol}' was not found "
+            f"and no broker-specific variant exists "
+            f"(code={code}, message={message})."
+        )
+
+    candidates.sort(
+        key=lambda value: (
+            len(value),
+            value.upper(),
+        )
+    )
+
+    shortest_length = len(
+        candidates[0]
+    )
+
+    shortest_candidates = [
+        value
+        for value in candidates
+        if len(value) == shortest_length
+    ]
+
+    if len(shortest_candidates) > 1:
+        raise MT5MarketError(
+            f"MT5 symbol '{clean_symbol}' has multiple "
+            f"equally suitable broker variants: "
+            f"{', '.join(shortest_candidates)}."
+        )
+
+    return candidates[0]
+
+
+def ensure_symbol_selected(
+    symbol: str,
+) -> str:
+    """
+    Resolve a canonical symbol and ensure the broker's actual
+    MT5 symbol is visible/selected in Market Watch.
+
+    Some brokers do not expose tick/candle data for a symbol
+    until it has been selected.
+
+    Returns the broker's actual MT5 symbol name.
+    """
+    resolved_symbol = resolve_mt5_symbol(
+        symbol
+    )
+
+    info = mt5.symbol_info(
+        resolved_symbol
+    )
 
     if info is None:
         code, message = _last_error()
 
         raise MT5MarketError(
-            f"MT5 symbol '{clean_symbol}' was not found "
+            f"MT5 symbol '{resolved_symbol}' was not found "
             f"(code={code}, message={message})."
         )
 
-    if bool(getattr(info, "visible", False)):
-        return
+    if bool(
+        getattr(info, "visible", False)
+    ):
+        return resolved_symbol
 
     selected = mt5.symbol_select(
-        clean_symbol,
+        resolved_symbol,
         True,
     )
 
@@ -125,9 +227,12 @@ def ensure_symbol_selected(symbol: str) -> None:
         code, message = _last_error()
 
         raise MT5MarketError(
-            f"Unable to select MT5 symbol '{clean_symbol}' "
+            f"Unable to select MT5 symbol "
+            f"'{resolved_symbol}' "
             f"(code={code}, message={message})."
         )
+
+    return resolved_symbol
 
 
 def get_symbol_info(
@@ -136,15 +241,8 @@ def get_symbol_info(
     """
     Return the broker-specific trading properties for a symbol.
     """
-    clean_symbol = symbol.strip()
-
-    if not clean_symbol:
-        raise MT5MarketError(
-            "Symbol is required."
-        )
-
-    ensure_symbol_selected(
-        clean_symbol
+    clean_symbol = ensure_symbol_selected(
+        symbol
     )
 
     info = mt5.symbol_info(
@@ -291,11 +389,12 @@ def get_live_tick(
 ) -> MT5Tick:
     """
     Return the latest bid/ask tick for a symbol.
-    """
-    clean_symbol = symbol.strip()
 
-    ensure_symbol_selected(
-        clean_symbol
+    Canonical TradeLogic symbols are resolved to the broker's
+    actual MT5 symbol before market data is requested.
+    """
+    clean_symbol = ensure_symbol_selected(
+        symbol
     )
 
     info = get_symbol_info(

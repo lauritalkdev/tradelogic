@@ -8,6 +8,8 @@ Important:
 - M15 is confirmation only.
 - The currently forming candle is deliberately excluded.
 - Live EMA21 contact is handled separately by live tick data.
+- Canonical TradeLogic symbols are resolved to the broker's
+  actual MT5 symbol before candle history is requested.
 - This module does not calculate indicators or place trades.
 """
 
@@ -109,14 +111,16 @@ def get_completed_candles(
             "Symbol is required."
         )
 
-    ensure_symbol_selected(clean_symbol)
+    broker_symbol = ensure_symbol_selected(
+        clean_symbol
+    )
 
     mt5_timeframe = resolve_timeframe(
         timeframe
     )
 
     rates = mt5.copy_rates_from_pos(
-        clean_symbol,
+        broker_symbol,
         mt5_timeframe,
         1,
         count,
@@ -127,14 +131,16 @@ def get_completed_candles(
 
         raise MT5CandleError(
             f"Unable to retrieve {timeframe.upper()} candles "
-            f"for '{clean_symbol}' "
-            f"(code={code}, message={message})."
+            f"for '{broker_symbol}' "
+            f"(canonical='{clean_symbol}', "
+            f"code={code}, message={message})."
         )
 
     if len(rates) == 0:
         raise MT5CandleError(
             f"MT5 returned no {timeframe.upper()} candle data "
-            f"for '{clean_symbol}'."
+            f"for '{broker_symbol}' "
+            f"(canonical='{clean_symbol}')."
         )
 
     candles: list[MT5Candle] = []
