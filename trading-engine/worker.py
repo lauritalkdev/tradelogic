@@ -598,33 +598,31 @@ def _manage_existing_positions(
 def _process_pending_broker_command(
     *,
     repository: WorkerRepository,
-    bot: AssignedBotRecord,
+    bot: AssignedBotRecord | None,
     broker: BrokerAccountRecord,
     settings: WorkerSettings,
     session_manager: MT5SessionManager,
 ) -> bool:
-    if (
-        broker.worker_command.strip().lower()
-        == "none"
-    ):
+    """
+    Process one pending broker command.
+
+    bot is optional because an idle worker must be able to connect or verify
+    a broker account before a subscription bot has been assigned.
+    """
+    if broker.worker_command.strip().lower() == "none":
         return False
 
-    if (
-        broker.worker_command_status.strip().lower()
-        != "pending"
-    ):
+    if broker.worker_command_status.strip().lower() != "pending":
         return False
 
     process_broker_command(
         repository=repository,
         broker=broker,
         terminal_path=settings.terminal_path,
-        bot_instance_id=bot.id,
+        bot_instance_id=bot.id if bot is not None else None,
         session_manager=session_manager,
     )
-
     return True
-
 
 def _ensure_trading_session(
     *,
@@ -1184,7 +1182,36 @@ def run_worker_forever(
             )
 
             if not assigned_bots:
-                manager.disconnect()
+                pending_broker = repo.get_pending_broker_command()
+
+                if pending_broker is not None:
+                    try:
+                        _process_pending_broker_command(
+                            repository=repo,
+                            bot=None,
+                            broker=pending_broker,
+                            settings=worker_settings,
+                            session_manager=manager,
+                        )
+                    except (
+                        WorkerRepositoryError,
+                        BrokerCommandHandlerError,
+                        MT5SessionError,
+                    ) as exc:
+                        print(
+                            f"[TradeLogic worker] Broker command error: {exc}",
+                            flush=True,
+                        )
+                    finally:
+                        try:
+                            manager.disconnect(
+                                expected_broker_account_id=pending_broker.id
+                            )
+                        except Exception:
+                            pass
+                else:
+                    manager.disconnect()
+
                 time.sleep(
                     worker_settings.poll_interval_seconds
                 )

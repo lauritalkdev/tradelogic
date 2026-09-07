@@ -245,6 +245,44 @@ class WorkerRepository:
 
         return records
 
+    def get_pending_broker_command(
+        self,
+    ) -> BrokerAccountRecord | None:
+        """
+        Return the oldest pending broker command waiting for an idle worker.
+
+        Broker connection and verification can happen before a trading bot is
+        assigned, so command discovery must not depend on bot_instances.
+        Claiming remains atomic in mark_broker_command_processing().
+        """
+        try:
+            response = (
+                self._client
+                .table("broker_accounts")
+                .select("id")
+                .eq("worker_command_status", "pending")
+                .neq("worker_command", "none")
+                .order("worker_command_updated_at", desc=False)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:
+            raise WorkerRepositoryError(
+                f"Unable to load pending broker command: {exc}"
+            ) from exc
+
+        rows = response.data or []
+        if not rows:
+            return None
+
+        broker_account_id = rows[0].get("id")
+        if not broker_account_id:
+            raise WorkerRepositoryError(
+                "Pending broker command returned no broker account ID."
+            )
+
+        return self.get_broker_account(broker_account_id)
+
     def get_broker_account(
         self,
         broker_account_id: UUID | str,
