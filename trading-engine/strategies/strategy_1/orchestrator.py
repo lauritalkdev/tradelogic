@@ -3,30 +3,46 @@ TradeLogic - Strategy 1 Orchestrator
 
 Coordinates the already-built Strategy 1 components.
 
-For a possible new entry it combines:
+Strategy 1 has three independent entry pathways:
 
-- completed M5/M15 market snapshot
-- live Bid/Ask prices
-- EMA/MACD signal evaluation
-- first EMA21 contact detection
-- rolling circuit breaker
-- MT5 concurrency protection
-- live account equity
-- 5% risk sizing
-- EMA50-based stop-loss
-- initial 3R take-profit
-- MT5 order execution
+Path A
+------
+M15 EMA trend + M15 MACD confirmation
+-> M5 EMA21 live-price pullback entry
+-> M5 EMA50 stop-loss reference
 
-For existing positions it delegates to the Strategy 1 live
-trade-management module.
+Path B
+------
+M1 EMA21 / EMA200 confirmed cross
+-> move away
+-> retest
+-> M1 EMA50 stop-loss reference
 
-IMPORTANT:
+Path C
+------
+M5 EMA21 / EMA200 confirmed cross
+-> move away
+-> retest
+-> M5 EMA50 stop-loss reference
+
+ENTRY ARBITRATION
+-----------------
+If multiple pathways generate ENTRY in the same direction during
+the same evaluation cycle, only one Strategy 1 trade may open.
+
+Priority:
+    1. Path B - M1 cross/retest
+    2. Path C - M5 cross/retest
+    3. Path A - normal M15/M5 setup
+
+If both BUY and SELL entry signals occur during the same cycle,
+NO trade is opened for that cycle.
+
+Cross/retest state is intentionally worker-runtime state only.
+It is not persisted to Supabase and is not reconstructed after a
+worker restart.
+
 This module performs ONE orchestration cycle at a time.
-
-It does not contain an infinite worker loop. The future TradeLogic
-worker will repeatedly call this orchestrator while also handling
-Supabase commands, heartbeats, account ownership, subscriptions,
-recovery and persistence.
 """
 
 from __future__ import annotations
@@ -37,6 +53,7 @@ from datetime import datetime, timezone
 from config.strategy_1 import STRATEGY_1
 from execution.orders import OrderDirection
 from execution.positions import can_open_strategy_1_symbol
+from indicators.technical import Strategy1IndicatorSnapshot
 from mt5.account import get_account_snapshot
 from safety.circuit_breaker import (
     CircuitBreakerDecision,
@@ -48,10 +65,14 @@ from strategies.strategy_1.market_snapshot import (
     build_strategy_1_market_snapshot,
 )
 from strategies.strategy_1.signal import (
+    CrossRetestEvaluation,
+    CrossRetestState,
     SignalDirection,
     SignalStatus,
+    Strategy1EntryPath,
     Strategy1Signal,
-    evaluate_strategy_1_signal,
+    evaluate_cross_retest_path,
+    evaluate_path_a_signal,
 )
 from strategies.strategy_1.trade_management import (
     Strategy1ManagementResult,
@@ -70,10 +91,10 @@ class Strategy1OrchestratorError(RuntimeError):
 @dataclass(frozen=True)
 class PreviousLivePrices:
     """
-    Previous executable prices for first-contact detection.
+    Previous executable prices.
 
-    BUY setup contact is evaluated using Ask.
-    SELL setup contact is evaluated using Bid.
+    BUY contact/retest logic uses Ask.
+    SELL contact/retest logic uses Bid.
     """
 
     bid: float
@@ -92,6 +113,12 @@ class Strategy1EntryCycleResult:
 
     current_prices: PreviousLivePrices
 
+    m1_cross_state: CrossRetestState | None
+    m5_cross_state: CrossRetestState | None
+
+    m1_completed_at: datetime
+    m5_completed_at: datetime
+
     entry_allowed: bool
 
     reason: str
@@ -103,8 +130,8 @@ class PersistedStrategy1Position:
     Minimum persisted state required to continue managing an
     already-open Strategy 1 position after subsequent worker cycles.
 
-    These values must eventually come from TradeLogic's database,
-    not only worker memory.
+    These values come from TradeLogic's database rather than from
+    temporary worker memory.
     """
 
     position_ticket: int
@@ -137,45 +164,326 @@ def _validate_previous_prices(
         )
 
 
-def _evaluate_live_signal(
+def _confirmed_cross_direction(
+    snapshot: Strategy1IndicatorSnapshot,
+) -> SignalDirection:
+    """
+    Determine whether the newest completed candle confirmed a
+    genuine EMA21 / EMA200 crossover.
+
+    This mirrors the signal engine's crossover definition so the
+    orchestrator can choose the correct executable price side before
+    evaluating the independent cross pathway.
+    """
+
+    bullish_cross = (
+        snapshot.previous_ema21
+        <= snapshot.previous_ema200
+        and snapshot.ema21
+        > snapshot.ema200
+    )
+
+    if bullish_cross:
+        return SignalDirection.BUY
+
+    bearish_cross = (
+        snapshot.previous_ema21
+        >= snapshot.previous_ema200
+        and snapshot.ema21
+        < snapshot.ema200
+    )
+
+    if bearish_cross:
+        return SignalDirection.SELL
+
+    return SignalDirection.NONE
+
+
+def _executable_price(
+    *,
+    direction: SignalDirection,
+    market: Strategy1MarketSnapshot,
+) -> float:
+    """
+    Return the correct executable MT5 price for a strategy direction.
+
+    BUY:
+        Ask
+
+    SELL:
+        Bid
+    """
+
+    if direction == SignalDirection.BUY:
+        return market.tick.ask
+
+    if direction == SignalDirection.SELL:
+        return market.tick.bid
+
+    raise Strategy1OrchestratorError(
+        "Executable price requires BUY or SELL direction."
+    )
+
+
+def _evaluate_path_a(
     *,
     market: Strategy1MarketSnapshot,
     previous_prices: PreviousLivePrices,
-) -> Strategy1Signal:
+) -> list[Strategy1Signal]:
     """
-    Evaluate Strategy 1 using the correct executable side.
+    Evaluate both Path-A directions using the correct executable side.
 
-    The existing signal engine accepts one live current/previous
-    price pair.
-
-    Therefore:
-    - BUY first-contact detection uses Ask
-    - SELL first-contact detection uses Bid
-
-    We evaluate both price sides but only accept the result whose
-    strategy direction matches that executable side.
+    Normally only one direction can satisfy M15 EMA ordering.
+    Returning both results keeps arbitration explicit.
     """
 
-    buy_side_signal = evaluate_strategy_1_signal(
+    buy_signal = evaluate_path_a_signal(
         m5=market.m5,
         m15=market.m15,
         current_price=market.tick.ask,
         previous_price=previous_prices.ask,
         point=market.point,
+        direction=SignalDirection.BUY,
     )
 
-    if buy_side_signal.direction == SignalDirection.BUY:
-        return buy_side_signal
-
-    sell_side_signal = evaluate_strategy_1_signal(
+    sell_signal = evaluate_path_a_signal(
         m5=market.m5,
         m15=market.m15,
         current_price=market.tick.bid,
         previous_price=previous_prices.bid,
         point=market.point,
+        direction=SignalDirection.SELL,
     )
 
-    return sell_side_signal
+    return [
+        buy_signal,
+        sell_signal,
+    ]
+
+
+def _evaluate_cross_path(
+    *,
+    market: Strategy1MarketSnapshot,
+    snapshot: Strategy1IndicatorSnapshot,
+    completed_at: datetime,
+    previous_completed_at: datetime | None,
+    state: CrossRetestState | None,
+    timeframe: str,
+    path: Strategy1EntryPath,
+) -> CrossRetestEvaluation | None:
+    """
+    Evaluate one cross/retest pathway safely.
+
+    IMPORTANT RESTART RULE
+    ----------------------
+    If there is no runtime state and this completed candle was already
+    observed previously, no new cross setup is reconstructed.
+
+    This prevents:
+    - worker restart
+    - first market read
+    - old already-completed crossover
+
+    from becoming a fresh trading setup.
+
+    A new setup may begin only when a genuinely new completed candle
+    is observed after the worker has established its baseline.
+    """
+
+    normalized_timeframe = (
+        timeframe
+        .strip()
+        .upper()
+    )
+
+    # ---------------------------------------------------------
+    # ACTIVE SETUP
+    #
+    # Existing runtime state must be evaluated every worker poll
+    # because move-away and retest use live prices.
+    # ---------------------------------------------------------
+    if state is not None:
+        effective_direction = state.direction
+
+        # If a genuinely new completed candle confirms an opposite
+        # EMA21/EMA200 cross, that new cross replaces the old pending
+        # setup. Choose the executable price from the NEW direction
+        # before handing control to the signal engine.
+        if (
+            previous_completed_at is not None
+            and completed_at > previous_completed_at
+        ):
+            new_cross_direction = _confirmed_cross_direction(
+                snapshot
+            )
+
+            if (
+                new_cross_direction
+                in {
+                    SignalDirection.BUY,
+                    SignalDirection.SELL,
+                }
+            ):
+                effective_direction = new_cross_direction
+
+        price = _executable_price(
+            direction=effective_direction,
+            market=market,
+        )
+
+        return evaluate_cross_retest_path(
+            snapshot=snapshot,
+            completed_at=completed_at,
+            current_price=price,
+            point=market.point,
+            timeframe=normalized_timeframe,
+            path=path,
+            state=state,
+        )
+
+    # ---------------------------------------------------------
+    # NO ACTIVE SETUP
+    #
+    # On first observation we only establish the candle baseline.
+    # ---------------------------------------------------------
+    if previous_completed_at is None:
+        return None
+
+    # No new completed candle -> do not recreate an old cross.
+    if completed_at <= previous_completed_at:
+        return None
+
+    cross_direction = _confirmed_cross_direction(
+        snapshot
+    )
+
+    if cross_direction == SignalDirection.NONE:
+        return None
+
+    price = _executable_price(
+        direction=cross_direction,
+        market=market,
+    )
+
+    return evaluate_cross_retest_path(
+        snapshot=snapshot,
+        completed_at=completed_at,
+        current_price=price,
+        point=market.point,
+        timeframe=normalized_timeframe,
+        path=path,
+        state=None,
+    )
+
+
+def _entry_signals(
+    signals: list[Strategy1Signal],
+) -> list[Strategy1Signal]:
+    return [
+        signal
+        for signal in signals
+        if signal.status == SignalStatus.ENTRY
+        and signal.direction
+        in {
+            SignalDirection.BUY,
+            SignalDirection.SELL,
+        }
+    ]
+
+
+def _select_entry_signal(
+    signals: list[Strategy1Signal],
+) -> tuple[Strategy1Signal | None, str]:
+    """
+    Select exactly one ENTRY signal.
+
+    Rules:
+
+    1. No ENTRY signals:
+       no trade.
+
+    2. Both BUY and SELL ENTRY signals:
+       no trade for this cycle.
+
+    3. Multiple same-direction signals:
+       priority is:
+
+           Path B M1
+           Path C M5
+           Path A
+
+    Existing one-position-per-symbol protection remains an additional
+    safety layer after this arbitration.
+    """
+
+    entries = _entry_signals(
+        signals
+    )
+
+    if not entries:
+        return (
+            None,
+            "no_entry_signal",
+        )
+
+    directions = {
+        signal.direction
+        for signal in entries
+    }
+
+    if len(directions) > 1:
+        return (
+            None,
+            "contradictory_entry_signals",
+        )
+
+    priority = {
+        Strategy1EntryPath.PATH_B_M1_CROSS: 1,
+        Strategy1EntryPath.PATH_C_M5_CROSS: 2,
+        Strategy1EntryPath.PATH_A: 3,
+    }
+
+    selected = min(
+        entries,
+        key=lambda signal: priority[
+            signal.path
+        ],
+    )
+
+    return (
+        selected,
+        "entry_selected",
+    )
+
+
+def _stop_reference_for_signal(
+    *,
+    signal: Strategy1Signal,
+    market: Strategy1MarketSnapshot,
+) -> Strategy1IndicatorSnapshot:
+    """
+    Return the correct EMA50 snapshot for the selected pathway.
+
+    Path A -> M5
+    Path B -> M1
+    Path C -> M5
+    """
+
+    if (
+        signal.path
+        == Strategy1EntryPath.PATH_B_M1_CROSS
+    ):
+        return market.m1
+
+    if signal.path in {
+        Strategy1EntryPath.PATH_A,
+        Strategy1EntryPath.PATH_C_M5_CROSS,
+    }:
+        return market.m5
+
+    raise Strategy1OrchestratorError(
+        f"Unsupported Strategy 1 entry path '{signal.path}'."
+    )
 
 
 def evaluate_strategy_1_entry_cycle(
@@ -183,31 +491,50 @@ def evaluate_strategy_1_entry_cycle(
     symbol: str,
     previous_prices: PreviousLivePrices | None,
     exit_events: list[TradeExitEvent],
+    m1_cross_state: CrossRetestState | None = None,
+    m5_cross_state: CrossRetestState | None = None,
+    previous_m1_completed_at: datetime | None = None,
+    previous_m5_completed_at: datetime | None = None,
     paused_until: datetime | None = None,
     now: datetime | None = None,
 ) -> Strategy1EntryCycleResult:
     """
     Run one Strategy 1 new-entry evaluation cycle for one symbol.
 
-    First worker observation:
-        If previous_prices is None, no entry is allowed yet.
+    FIRST WORKER OBSERVATION
+    ------------------------
+    No trade is opened.
 
-        The current Bid/Ask becomes the baseline so that TradeLogic
-        can detect a genuine subsequent first contact with EMA21.
+    Current:
+    - Bid
+    - Ask
+    - latest completed M1 candle time
+    - latest completed M5 candle time
 
-        This prevents a worker restart from immediately entering
-        merely because price already happens to be inside the zone.
+    become runtime baselines.
 
-    Normal cycle:
-        1. Build live market snapshot.
-        2. Evaluate rolling circuit breaker.
-        3. Evaluate M5/M15 trend + M5 MACD + EMA21 contact.
-        4. Enforce one position per symbol / two total.
-        5. Read live account equity.
-        6. Build and execute the Strategy 1 order.
+    This protects both:
+    - Path-A first-contact logic
+    - Path-B/C cross freshness logic
+
+    NORMAL CYCLE
+    ------------
+    1. Build M1/M5/M15 market snapshot.
+    2. Evaluate circuit breaker.
+    3. Evaluate Path A.
+    4. Update/evaluate Path B.
+    5. Update/evaluate Path C.
+    6. Reject contradictory BUY/SELL entries.
+    7. Apply same-direction pathway priority.
+    8. Enforce position concurrency.
+    9. Read live account equity.
+    10. Choose pathway-specific EMA50 stop reference.
+    11. Size and execute the trade.
     """
 
-    clean_symbol = symbol.strip()
+    clean_symbol = (
+        symbol.strip()
+    )
 
     if not clean_symbol:
         raise Strategy1OrchestratorError(
@@ -245,21 +572,36 @@ def evaluate_strategy_1_entry_cycle(
     )
 
     # ---------------------------------------------------------
-    # FIRST OBSERVATION
+    # FIRST WORKER OBSERVATION
+    #
+    # Establish live-price and completed-candle baselines only.
+    # Do not reconstruct an old pending cross.
     # ---------------------------------------------------------
-    if previous_prices is None:
+    if (
+        previous_prices is None
+        or previous_m1_completed_at is None
+        or previous_m5_completed_at is None
+    ):
         return Strategy1EntryCycleResult(
             symbol=clean_symbol,
             signal=None,
             circuit_breaker=circuit,
             opened_trade=None,
             current_prices=current_prices,
+            m1_cross_state=None,
+            m5_cross_state=None,
+            m1_completed_at=market.m1_completed_at,
+            m5_completed_at=market.m5_completed_at,
             entry_allowed=False,
-            reason="awaiting_previous_live_price",
+            reason="awaiting_runtime_baseline",
         )
 
     # ---------------------------------------------------------
     # CIRCUIT BREAKER
+    #
+    # Pending cross states are cleared while entry trading is
+    # circuit-breaker paused so stale setups cannot survive a
+    # potentially long trading suspension.
     # ---------------------------------------------------------
     if not circuit.entries_allowed:
         return Strategy1EntryCycleResult(
@@ -268,45 +610,168 @@ def evaluate_strategy_1_entry_cycle(
             circuit_breaker=circuit,
             opened_trade=None,
             current_prices=current_prices,
+            m1_cross_state=None,
+            m5_cross_state=None,
+            m1_completed_at=market.m1_completed_at,
+            m5_completed_at=market.m5_completed_at,
             entry_allowed=False,
             reason="circuit_breaker_paused",
         )
 
     # ---------------------------------------------------------
-    # STRATEGY SIGNAL
+    # PATH A
     # ---------------------------------------------------------
-    signal = _evaluate_live_signal(
+    path_a_signals = _evaluate_path_a(
         market=market,
         previous_prices=previous_prices,
     )
 
-    if signal.status != SignalStatus.ENTRY:
+    # ---------------------------------------------------------
+    # PATH B - M1 CROSS / RETEST
+    # ---------------------------------------------------------
+    m1_evaluation = _evaluate_cross_path(
+        market=market,
+        snapshot=market.m1,
+        completed_at=market.m1_completed_at,
+        previous_completed_at=previous_m1_completed_at,
+        state=m1_cross_state,
+        timeframe="M1",
+        path=Strategy1EntryPath.PATH_B_M1_CROSS,
+    )
+
+    updated_m1_state = (
+        m1_evaluation.state
+        if m1_evaluation is not None
+        else m1_cross_state
+    )
+
+    # ---------------------------------------------------------
+    # PATH C - M5 CROSS / RETEST
+    # ---------------------------------------------------------
+    m5_evaluation = _evaluate_cross_path(
+        market=market,
+        snapshot=market.m5,
+        completed_at=market.m5_completed_at,
+        previous_completed_at=previous_m5_completed_at,
+        state=m5_cross_state,
+        timeframe="M5",
+        path=Strategy1EntryPath.PATH_C_M5_CROSS,
+    )
+
+    updated_m5_state = (
+        m5_evaluation.state
+        if m5_evaluation is not None
+        else m5_cross_state
+    )
+
+    # ---------------------------------------------------------
+    # COLLECT ALL PATHWAY SIGNALS
+    # ---------------------------------------------------------
+    all_signals: list[Strategy1Signal] = [
+        *path_a_signals,
+    ]
+
+    if m1_evaluation is not None:
+        all_signals.append(
+            m1_evaluation.signal
+        )
+
+    if m5_evaluation is not None:
+        all_signals.append(
+            m5_evaluation.signal
+        )
+
+    selected_signal, selection_reason = (
+        _select_entry_signal(
+            all_signals
+        )
+    )
+
+    # ---------------------------------------------------------
+    # NO ENTRY / CONTRADICTORY ENTRY
+    # ---------------------------------------------------------
+    if selected_signal is None:
+        informative_signal: Strategy1Signal | None = None
+
+        # Prefer displaying an active waiting cross signal because it
+        # represents a concrete pending setup.
+        for candidate in all_signals:
+            if (
+                candidate.status
+                == SignalStatus.WAITING
+                and candidate.path
+                == Strategy1EntryPath.PATH_B_M1_CROSS
+            ):
+                informative_signal = candidate
+                break
+
+        if informative_signal is None:
+            for candidate in all_signals:
+                if (
+                    candidate.status
+                    == SignalStatus.WAITING
+                    and candidate.path
+                    == Strategy1EntryPath.PATH_C_M5_CROSS
+                ):
+                    informative_signal = candidate
+                    break
+
+        if informative_signal is None:
+            for candidate in all_signals:
+                if (
+                    candidate.status
+                    in {
+                        SignalStatus.WAITING,
+                        SignalStatus.INVALIDATED,
+                    }
+                ):
+                    informative_signal = candidate
+                    break
+
         return Strategy1EntryCycleResult(
             symbol=clean_symbol,
-            signal=signal,
+            signal=informative_signal,
             circuit_breaker=circuit,
             opened_trade=None,
             current_prices=current_prices,
+            m1_cross_state=updated_m1_state,
+            m5_cross_state=updated_m5_state,
+            m1_completed_at=market.m1_completed_at,
+            m5_completed_at=market.m5_completed_at,
             entry_allowed=False,
-            reason=f"signal_{signal.status.value}",
+            reason=selection_reason,
         )
 
     # ---------------------------------------------------------
     # DIRECTION MAPPING
     # ---------------------------------------------------------
-    if signal.direction == SignalDirection.BUY:
-        order_direction = OrderDirection.BUY
+    if (
+        selected_signal.direction
+        == SignalDirection.BUY
+    ):
+        order_direction = (
+            OrderDirection.BUY
+        )
 
-    elif signal.direction == SignalDirection.SELL:
-        order_direction = OrderDirection.SELL
+    elif (
+        selected_signal.direction
+        == SignalDirection.SELL
+    ):
+        order_direction = (
+            OrderDirection.SELL
+        )
 
     else:
         return Strategy1EntryCycleResult(
             symbol=clean_symbol,
-            signal=signal,
+            signal=selected_signal,
             circuit_breaker=circuit,
             opened_trade=None,
             current_prices=current_prices,
+            m1_cross_state=updated_m1_state,
+            m5_cross_state=updated_m5_state,
+            m1_completed_at=market.m1_completed_at,
+            m5_completed_at=market.m5_completed_at,
             entry_allowed=False,
             reason="signal_has_no_trade_direction",
         )
@@ -326,10 +791,14 @@ def evaluate_strategy_1_entry_cycle(
     if not can_open:
         return Strategy1EntryCycleResult(
             symbol=clean_symbol,
-            signal=signal,
+            signal=selected_signal,
             circuit_breaker=circuit,
             opened_trade=None,
             current_prices=current_prices,
+            m1_cross_state=updated_m1_state,
+            m5_cross_state=updated_m5_state,
+            m1_completed_at=market.m1_completed_at,
+            m5_completed_at=market.m5_completed_at,
             entry_allowed=False,
             reason=concurrency_reason,
         )
@@ -346,25 +815,48 @@ def evaluate_strategy_1_entry_cycle(
         )
 
     # ---------------------------------------------------------
+    # PATHWAY-SPECIFIC STOP REFERENCE
+    # ---------------------------------------------------------
+    stop_reference = (
+        _stop_reference_for_signal(
+            signal=selected_signal,
+            market=market,
+        )
+    )
+
+    # ---------------------------------------------------------
     # TRADE OPENING
     # ---------------------------------------------------------
     opened_trade = open_strategy_1_trade(
         symbol=clean_symbol,
         direction=order_direction,
         account_equity=account.equity,
-        m5=market.m5,
+        stop_reference=stop_reference,
         symbol_info=market.symbol_info,
         tick=market.tick,
     )
 
+    # ---------------------------------------------------------
+    # CONSUME CROSS STATES AFTER A SUCCESSFUL TRADE
+    #
+    # Any pending cross setup for this symbol is discarded once a
+    # trade opens. This prevents a stale second pathway from opening
+    # another trade after the first position later disappears.
+    # ---------------------------------------------------------
     return Strategy1EntryCycleResult(
         symbol=clean_symbol,
-        signal=signal,
+        signal=selected_signal,
         circuit_breaker=circuit,
         opened_trade=opened_trade,
         current_prices=current_prices,
+        m1_cross_state=None,
+        m5_cross_state=None,
+        m1_completed_at=market.m1_completed_at,
+        m5_completed_at=market.m5_completed_at,
         entry_allowed=True,
-        reason="trade_opened",
+        reason=(
+            f"trade_opened_{selected_signal.path.value}"
+        ),
     )
 
 
@@ -374,9 +866,8 @@ def manage_persisted_strategy_1_position(
     """
     Run one management cycle for an already-open Strategy 1 trade.
 
-    The worker will eventually load these original values from
-    Supabase so that a process restart cannot lose the trade's
-    frozen R structure.
+    Original entry, stop and R distance are persisted so a worker
+    restart cannot change the trade's frozen R structure.
     """
 
     if persisted.position_ticket <= 0:

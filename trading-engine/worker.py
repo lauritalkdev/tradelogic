@@ -71,6 +71,7 @@ from strategies.strategy_1.orchestrator import (
     evaluate_strategy_1_entry_cycle,
     manage_persisted_strategy_1_position,
 )
+from strategies.strategy_1.signal import CrossRetestState
 from worker_db.broker_command_handler import (
     BrokerCommandHandlerError,
     process_broker_command,
@@ -106,6 +107,18 @@ class WorkerSettings:
 @dataclass
 class WorkerRuntimeState:
     previous_prices: dict[tuple[UUID, str], PreviousLivePrices] = field(
+        default_factory=dict
+    )
+    m1_cross_states: dict[tuple[UUID, str], CrossRetestState] = field(
+        default_factory=dict
+    )
+    m5_cross_states: dict[tuple[UUID, str], CrossRetestState] = field(
+        default_factory=dict
+    )
+    previous_m1_completed_at: dict[tuple[UUID, str], datetime] = field(
+        default_factory=dict
+    )
+    previous_m5_completed_at: dict[tuple[UUID, str], datetime] = field(
         default_factory=dict
     )
     last_heartbeat_monotonic: float = 0.0
@@ -790,16 +803,68 @@ def _evaluate_entries(
             key
         )
 
+        m1_cross_state = runtime.m1_cross_states.get(
+            key
+        )
+
+        m5_cross_state = runtime.m5_cross_states.get(
+            key
+        )
+
+        previous_m1_completed_at = (
+            runtime.previous_m1_completed_at.get(
+                key
+            )
+        )
+
+        previous_m5_completed_at = (
+            runtime.previous_m5_completed_at.get(
+                key
+            )
+        )
+
         result = evaluate_strategy_1_entry_cycle(
             symbol=symbol,
             previous_prices=previous,
             exit_events=exit_events,
+            m1_cross_state=m1_cross_state,
+            m5_cross_state=m5_cross_state,
+            previous_m1_completed_at=previous_m1_completed_at,
+            previous_m5_completed_at=previous_m5_completed_at,
             paused_until=paused_until,
         )
 
         runtime.previous_prices[key] = (
             result.current_prices
         )
+
+        runtime.previous_m1_completed_at[key] = (
+            result.m1_completed_at
+        )
+
+        runtime.previous_m5_completed_at[key] = (
+            result.m5_completed_at
+        )
+
+        if result.m1_cross_state is None:
+            runtime.m1_cross_states.pop(
+                key,
+                None,
+            )
+        else:
+            runtime.m1_cross_states[key] = (
+                result.m1_cross_state
+            )
+
+        if result.m5_cross_state is None:
+            runtime.m5_cross_states.pop(
+                key,
+                None,
+            )
+        else:
+            runtime.m5_cross_states[key] = (
+                result.m5_cross_state
+            )
 
         if result.opened_trade is None:
             continue

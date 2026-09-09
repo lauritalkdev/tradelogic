@@ -6,14 +6,34 @@ broker-valid MT5 market position.
 
 Responsibilities:
 - choose BUY Ask or SELL Bid as the intended entry price
-- calculate the original EMA50-based stop-loss
+- calculate the pathway-specific EMA50-based stop-loss
 - calculate 5% account-equity position size
 - calculate the initial 3R take-profit
 - submit the MT5 market order
 
+Strategy 1 stop-loss references:
+
+Path A:
+    M5 EMA50
+
+Path B:
+    M1 EMA50
+
+Path C:
+    M5 EMA50
+
+Universal stop rule:
+
+BUY:
+    relevant EMA50 - configured broker-point buffer
+
+SELL:
+    relevant EMA50 + configured broker-point buffer
+
 This module does NOT:
 - decide whether a signal exists
 - calculate EMA/MACD indicators
+- choose the entry pathway
 - manage open positions after entry
 - enforce the circuit breaker
 - enforce subscription eligibility
@@ -23,12 +43,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from config.strategy_1 import STRATEGY_1
 from execution.orders import (
     MT5ExecutionResult,
     OrderDirection,
     open_market_position,
 )
 from indicators.technical import Strategy1IndicatorSnapshot
+from mt5.market import (
+    MT5SymbolInfo,
+    MT5Tick,
+)
 from positions.manager import (
     PositionDirection,
     create_initial_position_state,
@@ -37,11 +62,6 @@ from risk.position_sizing import (
     PositionSizeResult,
     RiskSizingError,
     calculate_position_size,
-)
-from config.strategy_1 import STRATEGY_1
-from mt5.market import (
-    MT5SymbolInfo,
-    MT5Tick,
 )
 
 
@@ -117,22 +137,29 @@ def build_trade_plan(
     symbol: str,
     direction: OrderDirection,
     account_equity: float,
-    m5: Strategy1IndicatorSnapshot,
+    stop_reference: Strategy1IndicatorSnapshot,
     symbol_info: MT5SymbolInfo,
     tick: MT5Tick,
 ) -> Strategy1TradePlan:
     """
     Build the complete Strategy 1 order plan.
 
+    stop_reference must be the indicator snapshot belonging to the
+    pathway that generated the approved entry:
+
+        Path A -> M5
+        Path B -> M1
+        Path C -> M5
+
     BUY:
         intended entry = current Ask
-        SL = M5 EMA50 - 5 broker points
+        SL = relevant EMA50 - configured broker-point buffer
 
     SELL:
         intended entry = current Bid
-        SL = M5 EMA50 + 5 broker points
+        SL = relevant EMA50 + configured broker-point buffer
 
-    Position size is calculated so the original stop is
+    Position size is calculated so the original stop represents
     approximately 5% of account equity.
 
     Initial TP is exactly 3R from the intended entry.
@@ -155,22 +182,30 @@ def build_trade_plan(
             "Symbol information does not match the requested symbol."
         )
 
+    if stop_reference.ema50 <= 0:
+        raise Strategy1TradeOpeningError(
+            "EMA50 stop-loss reference must be greater than zero."
+        )
+
     point_buffer = (
         STRATEGY_1.stop_loss_buffer_points
         * symbol_info.point
     )
 
+    # ---------------------------------------------------------
+    # BUY
+    # ---------------------------------------------------------
     if direction == OrderDirection.BUY:
         intended_entry = tick.ask
 
         stop_loss = (
-            m5.ema50
+            stop_reference.ema50
             - point_buffer
         )
 
         if stop_loss >= intended_entry:
             raise Strategy1TradeOpeningError(
-                "Invalid BUY setup: EMA50-based stop-loss "
+                "Invalid BUY setup: pathway EMA50-based stop-loss "
                 "is not below the intended entry price."
             )
 
@@ -178,17 +213,20 @@ def build_trade_plan(
             PositionDirection.BUY
         )
 
+    # ---------------------------------------------------------
+    # SELL
+    # ---------------------------------------------------------
     elif direction == OrderDirection.SELL:
         intended_entry = tick.bid
 
         stop_loss = (
-            m5.ema50
+            stop_reference.ema50
             + point_buffer
         )
 
         if stop_loss <= intended_entry:
             raise Strategy1TradeOpeningError(
-                "Invalid SELL setup: EMA50-based stop-loss "
+                "Invalid SELL setup: pathway EMA50-based stop-loss "
                 "is not above the intended entry price."
             )
 
@@ -210,6 +248,25 @@ def build_trade_plan(
         price=stop_loss,
         digits=symbol_info.digits,
     )
+
+    # Re-check geometry after broker-digit normalization.
+    if (
+        direction == OrderDirection.BUY
+        and stop_loss >= intended_entry
+    ):
+        raise Strategy1TradeOpeningError(
+            "Invalid BUY setup after price normalization: "
+            "stop-loss is not below entry."
+        )
+
+    if (
+        direction == OrderDirection.SELL
+        and stop_loss <= intended_entry
+    ):
+        raise Strategy1TradeOpeningError(
+            "Invalid SELL setup after price normalization: "
+            "stop-loss is not above entry."
+        )
 
     tick_value_loss = _loss_tick_value(
         symbol_info
@@ -243,6 +300,27 @@ def build_trade_plan(
         digits=symbol_info.digits,
     )
 
+    # ---------------------------------------------------------
+    # FINAL TP GEOMETRY SAFETY CHECK
+    # ---------------------------------------------------------
+    if (
+        direction == OrderDirection.BUY
+        and take_profit <= intended_entry
+    ):
+        raise Strategy1TradeOpeningError(
+            "Invalid BUY setup: calculated take-profit "
+            "is not above the intended entry price."
+        )
+
+    if (
+        direction == OrderDirection.SELL
+        and take_profit >= intended_entry
+    ):
+        raise Strategy1TradeOpeningError(
+            "Invalid SELL setup: calculated take-profit "
+            "is not below the intended entry price."
+        )
+
     return Strategy1TradePlan(
         symbol=clean_symbol,
         direction=direction,
@@ -266,15 +344,23 @@ def open_strategy_1_trade(
     symbol: str,
     direction: OrderDirection,
     account_equity: float,
-    m5: Strategy1IndicatorSnapshot,
+    stop_reference: Strategy1IndicatorSnapshot,
     symbol_info: MT5SymbolInfo,
     tick: MT5Tick,
 ) -> Strategy1OpenedTrade:
     """
     Build and immediately execute a Strategy 1 market order.
 
+    stop_reference MUST correspond to the pathway that produced
+    the approved signal:
+
+        Path A -> M5 snapshot
+        Path B -> M1 snapshot
+        Path C -> M5 snapshot
+
     This function must only be called AFTER:
     - Strategy 1 returned ENTRY
+    - pathway arbitration passed
     - subscription/cycle eligibility passed
     - circuit breaker passed
     - concurrency rules passed
@@ -286,7 +372,7 @@ def open_strategy_1_trade(
         symbol=symbol,
         direction=direction,
         account_equity=account_equity,
-        m5=m5,
+        stop_reference=stop_reference,
         symbol_info=symbol_info,
         tick=tick,
     )

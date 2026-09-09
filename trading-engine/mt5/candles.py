@@ -4,10 +4,13 @@ TradeLogic - MetaTrader 5 Candle Data
 Provides completed MT5 candle history for Strategy 1.
 
 Important:
-- M5 is the Strategy 1 execution timeframe.
-- M15 is confirmation only.
+- M1 supports the independent Strategy 1 EMA21 / EMA200
+  cross-retest pathway.
+- M5 is the normal Strategy 1 execution timeframe and also
+  supports its own independent EMA21 / EMA200 cross-retest pathway.
+- M15 is the normal Strategy 1 trend + MACD confirmation timeframe.
 - The currently forming candle is deliberately excluded.
-- Live EMA21 contact is handled separately by live tick data.
+- Live EMA contact/retest detection is handled separately by live tick data.
 - Canonical TradeLogic symbols are resolved to the broker's
   actual MT5 symbol before candle history is requested.
 - This module does not calculate indicators or place trades.
@@ -41,6 +44,7 @@ class MT5Candle:
 
 
 _TIMEFRAMES: dict[str, int] = {
+    "M1": mt5.TIMEFRAME_M1,
     "M5": mt5.TIMEFRAME_M5,
     "M15": mt5.TIMEFRAME_M15,
 }
@@ -48,14 +52,24 @@ _TIMEFRAMES: dict[str, int] = {
 
 def _last_error() -> tuple[int | None, str | None]:
     """Return the most recent MetaTrader5 error safely."""
+
     try:
         error = mt5.last_error()
 
         if not error:
             return None, None
 
-        code = error[0] if len(error) > 0 else None
-        message = str(error[1]) if len(error) > 1 else None
+        code = (
+            error[0]
+            if len(error) > 0
+            else None
+        )
+
+        message = (
+            str(error[1])
+            if len(error) > 1
+            else None
+        )
 
         return code, message
 
@@ -63,20 +77,34 @@ def _last_error() -> tuple[int | None, str | None]:
         return None, str(exc)
 
 
-def resolve_timeframe(timeframe: str) -> int:
+def resolve_timeframe(
+    timeframe: str,
+) -> int:
     """
     Convert a TradeLogic timeframe name into its MT5 constant.
 
-    Strategy 1 currently supports M5 and M15.
+    Strategy 1 supports:
+    - M1
+    - M5
+    - M15
     """
-    normalized = timeframe.strip().upper()
 
-    mt5_timeframe = _TIMEFRAMES.get(normalized)
+    normalized = (
+        timeframe
+        .strip()
+        .upper()
+    )
+
+    mt5_timeframe = (
+        _TIMEFRAMES.get(
+            normalized
+        )
+    )
 
     if mt5_timeframe is None:
         raise MT5CandleError(
             f"Unsupported timeframe '{timeframe}'. "
-            "Strategy 1 supports M5 and M15."
+            "Strategy 1 supports M1, M5 and M15."
         )
 
     return mt5_timeframe
@@ -92,11 +120,16 @@ def get_completed_candles(
     Retrieve completed candles from MT5.
 
     start_pos=1 is intentional:
+
     - position 0 = currently forming candle
     - position 1 = most recently completed candle
 
     MT5 returns the selected candle block chronologically, so the
     final item in the returned list is the latest completed candle.
+
+    This completed-candle behavior is particularly important for the
+    Strategy 1 M1/M5 EMA21-EMA200 cross logic because a crossover is
+    confirmed only after the relevant candle has closed.
     """
 
     if count <= 0:
@@ -104,19 +137,25 @@ def get_completed_candles(
             "Candle count must be greater than zero."
         )
 
-    clean_symbol = symbol.strip()
+    clean_symbol = (
+        symbol.strip()
+    )
 
     if not clean_symbol:
         raise MT5CandleError(
             "Symbol is required."
         )
 
-    broker_symbol = ensure_symbol_selected(
-        clean_symbol
+    broker_symbol = (
+        ensure_symbol_selected(
+            clean_symbol
+        )
     )
 
-    mt5_timeframe = resolve_timeframe(
-        timeframe
+    mt5_timeframe = (
+        resolve_timeframe(
+            timeframe
+        )
     )
 
     rates = mt5.copy_rates_from_pos(
@@ -127,7 +166,9 @@ def get_completed_candles(
     )
 
     if rates is None:
-        code, message = _last_error()
+        code, message = (
+            _last_error()
+        )
 
         raise MT5CandleError(
             f"Unable to retrieve {timeframe.upper()} candles "
@@ -152,13 +193,27 @@ def get_completed_candles(
                     int(rate["time"]),
                     tz=timezone.utc,
                 ),
-                open=float(rate["open"]),
-                high=float(rate["high"]),
-                low=float(rate["low"]),
-                close=float(rate["close"]),
-                tick_volume=int(rate["tick_volume"]),
-                spread=int(rate["spread"]),
-                real_volume=int(rate["real_volume"]),
+                open=float(
+                    rate["open"]
+                ),
+                high=float(
+                    rate["high"]
+                ),
+                low=float(
+                    rate["low"]
+                ),
+                close=float(
+                    rate["close"]
+                ),
+                tick_volume=int(
+                    rate["tick_volume"]
+                ),
+                spread=int(
+                    rate["spread"]
+                ),
+                real_volume=int(
+                    rate["real_volume"]
+                ),
             )
         )
 
@@ -175,7 +230,12 @@ def get_completed_close_prices(
     Return completed candle closing prices as a NumPy array.
 
     This output can be passed directly into:
+
         indicators.technical.strategy_1_snapshot()
+
+    Strategy 1 currently requests at least 201 completed prices so
+    both the latest and immediately previous EMA states are available
+    for crossover detection.
     """
 
     candles = get_completed_candles(
@@ -185,7 +245,10 @@ def get_completed_close_prices(
     )
 
     return np.asarray(
-        [candle.close for candle in candles],
+        [
+            candle.close
+            for candle in candles
+        ],
         dtype=float,
     )
 

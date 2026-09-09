@@ -5,6 +5,27 @@ Central configuration for Strategy 1.
 
 Strategy logic should import values from this file instead of
 scattering strategy parameters throughout the trading engine.
+
+Strategy 1 has three independent entry pathways:
+
+Path A:
+- M15 trend confirmation
+- M15 MACD confirmation
+- M5 EMA21 retracement/contact entry
+
+Path B:
+- M1 EMA21 / EMA200 confirmed cross
+- wait for retest
+- independent entry
+
+Path C:
+- M5 EMA21 / EMA200 confirmed cross
+- wait for retest
+- independent entry
+
+All EMA-based entries use EMA50 as the stop-loss reference:
+- BUY  -> EMA50 minus the configured broker-point buffer
+- SELL -> EMA50 plus the configured broker-point buffer
 """
 
 from dataclasses import dataclass
@@ -21,18 +42,37 @@ class Strategy1Config:
 
     # ---------------------------------------------------------
     # Tradable symbols
+    #
+    # Canonical TradeLogic symbol names are kept here.
+    # Broker-specific names such as:
+    #   XAUUSDm
+    #   EURUSDm
+    #   GBPUSDm
+    #   US30m
+    # are resolved by the MT5 symbol-resolution layer.
     # ---------------------------------------------------------
     symbols: Tuple[str, ...] = (
         "XAUUSD",
         "EURUSD",
+        "GBPUSD",
+        "US30",
     )
 
     # ---------------------------------------------------------
     # Timeframes
     #
-    # M5  = execution / entry timeframe
-    # M15 = trend confirmation timeframe
+    # M1:
+    #   Independent EMA21 / EMA200 cross-retest pathway.
+    #
+    # M5:
+    #   Normal Path-A execution timeframe.
+    #   Also has its own independent EMA21 / EMA200
+    #   cross-retest pathway.
+    #
+    # M15:
+    #   Normal Path-A trend + MACD confirmation timeframe.
     # ---------------------------------------------------------
+    cross_timeframe_fast: str = "M1"
     entry_timeframe: str = "M5"
     confirmation_timeframe: str = "M15"
 
@@ -46,15 +86,25 @@ class Strategy1Config:
     # ---------------------------------------------------------
     # MACD configuration
     #
-    # Strategy uses MACD on M5 only.
-    # Both main and signal must be on the required side of zero.
+    # IMPORTANT:
+    # MACD is a confirmation filter for Path A on M15 only.
+    #
+    # BUY Path A:
+    #   M15 MACD main > 0
+    #   M15 MACD signal > 0
+    #
+    # SELL Path A:
+    #   M15 MACD main < 0
+    #   M15 MACD signal < 0
+    #
+    # Paths B and C do NOT require MACD.
     # ---------------------------------------------------------
     macd_fast_period: int = 3
     macd_slow_period: int = 9
     macd_signal_period: int = 16
 
     # ---------------------------------------------------------
-    # EMA21 pullback entry zone
+    # Path-A M5 EMA21 pullback entry zone
     #
     # IMPORTANT:
     # This is BROKER POINTS, not conventional forex pips.
@@ -65,13 +115,69 @@ class Strategy1Config:
     entry_zone_points: int = 5
 
     # ---------------------------------------------------------
+    # EMA21 / EMA200 cross-retest pathways
+    #
+    # A valid cross is confirmed using COMPLETED candles:
+    #
+    # Bullish:
+    #   previous EMA21 <= previous EMA200
+    #   newest   EMA21 >  newest   EMA200
+    #
+    # Bearish:
+    #   previous EMA21 >= previous EMA200
+    #   newest   EMA21 <  newest   EMA200
+    #
+    # After the confirmed cross, the setup waits for price to
+    # move away from the EMA21/EMA200 area and then return.
+    #
+    # The setup expires after this number of completed candles
+    # on its own timeframe:
+    #   M1 setup -> 10 completed M1 candles
+    #   M5 setup -> 10 completed M5 candles
+    #
+    # A reverse EMA21/EMA200 cross cancels the pending setup.
+    # ---------------------------------------------------------
+    cross_setup_expiry_candles: int = 10
+
+    # ---------------------------------------------------------
+    # Cross-retest contact zone
+    #
+    # The retest is allowed when live price:
+    # - touches EMA21, or
+    # - touches EMA200, or
+    # - enters the price area between EMA21 and EMA200.
+    #
+    # This broker-point tolerance expands the two EMA boundaries
+    # slightly so a near-touch is not rejected due to tick noise.
+    # ---------------------------------------------------------
+    cross_retest_zone_points: int = 5
+
+    # ---------------------------------------------------------
+    # Cross move-away requirement
+    #
+    # A newly confirmed cross does NOT immediately qualify as
+    # its own retest.
+    #
+    # Price must first move away from the EMA21/EMA200 area by
+    # at least this many broker points before a later return can
+    # trigger the retest entry.
+    # ---------------------------------------------------------
+    cross_move_away_points: int = 5
+
+    # ---------------------------------------------------------
     # Stop-loss buffer
     #
+    # UNIVERSAL EMA-BASED SL RULE:
+    #
     # BUY:
-    #   EMA50 at entry - 5 broker points
+    #   relevant timeframe EMA50 - 5 broker points
     #
     # SELL:
-    #   EMA50 at entry + 5 broker points
+    #   relevant timeframe EMA50 + 5 broker points
+    #
+    # Path A uses M5 EMA50.
+    # Path B uses M1 EMA50.
+    # Path C uses M5 EMA50.
     # ---------------------------------------------------------
     stop_loss_buffer_points: int = 5
 
@@ -79,6 +185,9 @@ class Strategy1Config:
     # Risk
     #
     # 0.05 = 5% of account equity at trade entry.
+    #
+    # Position sizing remains based on the actual distance
+    # between entry price and the EMA50-based stop loss.
     # ---------------------------------------------------------
     risk_fraction: float = 0.05
 
@@ -95,7 +204,10 @@ class Strategy1Config:
     # Maximum simultaneous positions
     #
     # One Strategy-1 position per symbol.
-    # Therefore XAUUSD + EURUSD may be open simultaneously.
+    #
+    # Even though Strategy 1 now supports four symbols,
+    # no more than two Strategy-1 positions may be open
+    # simultaneously.
     # ---------------------------------------------------------
     max_positions_per_symbol: int = 1
     max_total_positions: int = 2
