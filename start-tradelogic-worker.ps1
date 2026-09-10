@@ -13,6 +13,8 @@ $WorkerStderrLog = Join-Path $LogDir "worker-stderr.log"
 
 $WorkerId = "1941e76e-37c2-403e-8a9b-570f13d970cf"
 
+$script:WorkerProcess = $null
+
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 
 function Write-TradeLogicLog {
@@ -59,45 +61,42 @@ function Import-DotEnv {
     }
 }
 
-function Get-TradeLogicWorkerProcesses {
-    return @(
-        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object {
-            $_.CommandLine -and
-            $_.CommandLine -like "*trading-engine*worker.py*"
-        }
-    )
-}
-
 function Ensure-MetaTrader {
     $mt5Processes = @(
         Get-Process -Name "terminal64" -ErrorAction SilentlyContinue
     )
 
     if ($mt5Processes.Count -gt 0) {
-        return
+        return $true
     }
 
     Write-TradeLogicLog "MT5 is not running. Starting MT5."
 
-    $mt5 = Start-Process `
-        -FilePath $Mt5Exe `
-        -WorkingDirectory (Split-Path $Mt5Exe) `
-        -PassThru
+    try {
+        $mt5 = Start-Process `
+            -FilePath $Mt5Exe `
+            -WorkingDirectory (Split-Path $Mt5Exe) `
+            -PassThru
 
-    Write-TradeLogicLog "MT5 launch requested. PID=$($mt5.Id)."
+        Write-TradeLogicLog "MT5 launch requested. PID=$($mt5.Id)."
 
-    Start-Sleep -Seconds 15
+        Start-Sleep -Seconds 15
 
-    $mt5Check = @(
-        Get-Process -Name "terminal64" -ErrorAction SilentlyContinue
-    )
+        $mt5Check = @(
+            Get-Process -Name "terminal64" -ErrorAction SilentlyContinue
+        )
 
-    if ($mt5Check.Count -eq 0) {
-        Write-TradeLogicLog "ERROR: MT5 did not remain running after launch."
-    }
-    else {
+        if ($mt5Check.Count -eq 0) {
+            Write-TradeLogicLog "ERROR: MT5 did not remain running after launch."
+            return $false
+        }
+
         Write-TradeLogicLog "MT5 confirmed running."
+        return $true
+    }
+    catch {
+        Write-TradeLogicLog "ERROR starting MT5: $($_.Exception.Message)"
+        return $false
     }
 }
 
@@ -105,7 +104,7 @@ function Start-TradeLogicWorker {
     Write-TradeLogicLog "TradeLogic worker is not running. Starting worker."
 
     try {
-        $worker = Start-Process `
+        $script:WorkerProcess = Start-Process `
             -FilePath $PythonExe `
             -ArgumentList "`"$WorkerFile`"" `
             -WorkingDirectory $ProjectRoot `
@@ -114,22 +113,56 @@ function Start-TradeLogicWorker {
             -WindowStyle Hidden `
             -PassThru
 
-        Write-TradeLogicLog "Worker launch requested. PID=$($worker.Id)."
+        Write-TradeLogicLog "Worker launch requested. PID=$($script:WorkerProcess.Id)."
 
         Start-Sleep -Seconds 5
 
-        $worker.Refresh()
+        $script:WorkerProcess.Refresh()
 
-        if ($worker.HasExited) {
-            Write-TradeLogicLog "ERROR: Worker exited shortly after launch. ExitCode=$($worker.ExitCode)."
+        if ($script:WorkerProcess.HasExited) {
+            $exitCode = $script:WorkerProcess.ExitCode
+
+            Write-TradeLogicLog "ERROR: Worker exited shortly after launch. ExitCode=$exitCode."
             Write-TradeLogicLog "Inspect runtime-logs\worker-stderr.log and runtime-logs\worker-stdout.log."
+
+            $script:WorkerProcess = $null
+            return $false
         }
-        else {
-            Write-TradeLogicLog "Worker process remained alive after initial launch check."
-        }
+
+        Write-TradeLogicLog "Worker process remained alive after initial launch check."
+        return $true
     }
     catch {
         Write-TradeLogicLog "ERROR starting worker: $($_.Exception.Message)"
+        $script:WorkerProcess = $null
+        return $false
+    }
+}
+
+function Test-TradeLogicWorker {
+    if ($null -eq $script:WorkerProcess) {
+        return $false
+    }
+
+    try {
+        $script:WorkerProcess.Refresh()
+
+        if ($script:WorkerProcess.HasExited) {
+            $exitCode = $script:WorkerProcess.ExitCode
+
+            Write-TradeLogicLog "Worker exited. PID=$($script:WorkerProcess.Id), ExitCode=$exitCode."
+            Write-TradeLogicLog "Inspect runtime-logs\worker-stderr.log and runtime-logs\worker-stdout.log."
+
+            $script:WorkerProcess = $null
+            return $false
+        }
+
+        return $true
+    }
+    catch {
+        Write-TradeLogicLog "Worker process check failed: $($_.Exception.Message)"
+        $script:WorkerProcess = $null
+        return $false
     }
 }
 
@@ -181,15 +214,17 @@ catch {
 
 while ($true) {
     try {
-        Ensure-MetaTrader
+        $mt5Ready = Ensure-MetaTrader
 
-        $workerProcesses = Get-TradeLogicWorkerProcesses
+        if ($mt5Ready) {
+            $workerRunning = Test-TradeLogicWorker
 
-        if ($workerProcesses.Count -eq 0) {
-            Start-TradeLogicWorker
+            if (-not $workerRunning) {
+                Start-TradeLogicWorker | Out-Null
+            }
         }
-        elseif ($workerProcesses.Count -gt 2) {
-            Write-TradeLogicLog "WARNING: more than one normal worker process chain appears to exist. ProcessCount=$($workerProcesses.Count)."
+        else {
+            Write-TradeLogicLog "Worker launch deferred because MT5 is unavailable."
         }
     }
     catch {
