@@ -6,7 +6,7 @@ Central configuration for Strategy 1.
 Strategy logic should import values from this file instead of
 scattering strategy parameters throughout the trading engine.
 
-Strategy 1 has three independent entry pathways:
+Strategy 1 has four independent entry pathways:
 
 Path A:
 - M15 trend confirmation
@@ -23,9 +23,20 @@ Path C:
 - wait for retest
 - independent entry
 
-All EMA-based entries use EMA50 as the stop-loss reference:
+Path D:
+- M1 trend-continuation pullback
+- EMA21 > EMA50 > EMA200 for BUY
+- EMA21 < EMA50 < EMA200 for SELL
+- EMA21 must slope in the trade direction
+- live EMA21 or EMA50 pullback/contact entry
+
+Existing EMA-based entries use EMA50 as the stop-loss reference:
 - BUY  -> EMA50 minus the configured broker-point buffer
 - SELL -> EMA50 plus the configured broker-point buffer
+
+Path D stop-loss handling:
+- EMA21 entry -> M1 EMA50 plus/minus the configured buffer
+- EMA50 entry -> recent M1 pullback swing plus/minus the configured buffer
 """
 
 from dataclasses import dataclass
@@ -63,6 +74,7 @@ class Strategy1Config:
     #
     # M1:
     #   Independent EMA21 / EMA200 cross-retest pathway.
+    #   Path-D trend-continuation pullback pathway.
     #
     # M5:
     #   Normal Path-A execution timeframe.
@@ -97,7 +109,7 @@ class Strategy1Config:
     #   M15 MACD main < 0
     #   M15 MACD signal < 0
     #
-    # Paths B and C do NOT require MACD.
+    # Paths B, C and D do NOT require MACD.
     # ---------------------------------------------------------
     macd_fast_period: int = 3
     macd_slow_period: int = 9
@@ -165,9 +177,39 @@ class Strategy1Config:
     cross_move_away_points: int = 5
 
     # ---------------------------------------------------------
+    # Path-D M1 trend qualification
+    #
+    # BUY:
+    #   EMA21 > EMA50 > EMA200
+    #   EMA21 is currently rising
+    #
+    # SELL:
+    #   EMA21 < EMA50 < EMA200
+    #   EMA21 is currently falling
+    #
+    # No multi-candle persistence requirement is used.
+    # ---------------------------------------------------------
+
+    # ---------------------------------------------------------
+    # Path-D live EMA contact zone
+    #
+    # Path D does NOT wait for a completed rejection candle.
+    #
+    # BUY uses live Ask.
+    # SELL uses live Bid.
+    #
+    # A pullback may qualify when live executable price reaches
+    # the EMA21 or EMA50 contact zone from the correct side.
+    #
+    # IMPORTANT:
+    # This is BROKER POINTS, not conventional forex pips.
+    # ---------------------------------------------------------
+    path_d_contact_zone_points: int = 5
+
+    # ---------------------------------------------------------
     # Stop-loss buffer
     #
-    # UNIVERSAL EMA-BASED SL RULE:
+    # EXISTING EMA-BASED SL RULE:
     #
     # BUY:
     #   relevant timeframe EMA50 - 5 broker points
@@ -178,6 +220,16 @@ class Strategy1Config:
     # Path A uses M5 EMA50.
     # Path B uses M1 EMA50.
     # Path C uses M5 EMA50.
+    #
+    # PATH D:
+    #
+    # EMA21 entry:
+    #   BUY  -> M1 EMA50 - 5 broker points
+    #   SELL -> M1 EMA50 + 5 broker points
+    #
+    # EMA50 entry:
+    #   BUY  -> recent M1 pullback swing low - 5 broker points
+    #   SELL -> recent M1 pullback swing high + 5 broker points
     # ---------------------------------------------------------
     stop_loss_buffer_points: int = 5
 
@@ -187,7 +239,7 @@ class Strategy1Config:
     # 0.05 = 5% of account equity at trade entry.
     #
     # Position sizing remains based on the actual distance
-    # between entry price and the EMA50-based stop loss.
+    # between entry price and the selected stop loss.
     # ---------------------------------------------------------
     risk_fraction: float = 0.05
 

@@ -3,7 +3,7 @@ TradeLogic - Strategy 1 Orchestrator
 
 Coordinates the already-built Strategy 1 components.
 
-Strategy 1 has three independent entry pathways:
+Strategy 1 has four independent entry pathways:
 
 Path A
 ------
@@ -25,6 +25,13 @@ M5 EMA21 / EMA200 confirmed cross
 -> retest
 -> M5 EMA50 stop-loss reference
 
+Path D
+------
+M1 EMA21 / EMA50 trend-continuation pullback
+-> live EMA21 or EMA50 contact
+-> M1 EMA50 stop-loss reference for EMA21 contact
+-> recent completed-M1 swing stop reference for EMA50 contact
+
 ENTRY ARBITRATION
 -----------------
 If multiple pathways generate ENTRY in the same direction during
@@ -33,7 +40,8 @@ the same evaluation cycle, only one Strategy 1 trade may open.
 Priority:
     1. Path B - M1 cross/retest
     2. Path C - M5 cross/retest
-    3. Path A - normal M15/M5 setup
+    3. Path D - M1 trend pullback
+    4. Path A - normal M15/M5 setup
 
 If both BUY and SELL entry signals occur during the same cycle,
 NO trade is opened for that cycle.
@@ -73,6 +81,7 @@ from strategies.strategy_1.signal import (
     Strategy1Signal,
     evaluate_cross_retest_path,
     evaluate_path_a_signal,
+    evaluate_path_d_signal,
 )
 from strategies.strategy_1.trade_management import (
     Strategy1ManagementResult,
@@ -261,6 +270,40 @@ def _evaluate_path_a(
     ]
 
 
+def _evaluate_path_d(
+    *,
+    market: Strategy1MarketSnapshot,
+) -> list[Strategy1Signal]:
+    """
+    Evaluate both Path-D directions using the correct executable side.
+
+    BUY evaluates live Ask.
+    SELL evaluates live Bid.
+
+    Path D is independent of M15/MACD and uses only the current
+    completed-M1 EMA structure plus live EMA21/EMA50 contact.
+    """
+
+    buy_signal = evaluate_path_d_signal(
+        m1=market.m1,
+        current_price=market.tick.ask,
+        point=market.point,
+        direction=SignalDirection.BUY,
+    )
+
+    sell_signal = evaluate_path_d_signal(
+        m1=market.m1,
+        current_price=market.tick.bid,
+        point=market.point,
+        direction=SignalDirection.SELL,
+    )
+
+    return [
+        buy_signal,
+        sell_signal,
+    ]
+
+
 def _evaluate_cross_path(
     *,
     market: Strategy1MarketSnapshot,
@@ -410,6 +453,7 @@ def _select_entry_signal(
 
            Path B M1
            Path C M5
+           Path D M1
            Path A
 
     Existing one-position-per-symbol protection remains an additional
@@ -440,7 +484,8 @@ def _select_entry_signal(
     priority = {
         Strategy1EntryPath.PATH_B_M1_CROSS: 1,
         Strategy1EntryPath.PATH_C_M5_CROSS: 2,
-        Strategy1EntryPath.PATH_A: 3,
+        Strategy1EntryPath.PATH_D_M1_PULLBACK: 3,
+        Strategy1EntryPath.PATH_A: 4,
     }
 
     selected = min(
@@ -467,12 +512,13 @@ def _stop_reference_for_signal(
     Path A -> M5
     Path B -> M1
     Path C -> M5
+    Path D -> M1
     """
 
-    if (
-        signal.path
-        == Strategy1EntryPath.PATH_B_M1_CROSS
-    ):
+    if signal.path in {
+        Strategy1EntryPath.PATH_B_M1_CROSS,
+        Strategy1EntryPath.PATH_D_M1_PULLBACK,
+    }:
         return market.m1
 
     if signal.path in {
@@ -513,9 +559,10 @@ def evaluate_strategy_1_entry_cycle(
 
     become runtime baselines.
 
-    This protects both:
+    This protects:
     - Path-A first-contact logic
     - Path-B/C cross freshness logic
+    - Path-D from opening immediately on the first worker poll
 
     NORMAL CYCLE
     ------------
@@ -524,12 +571,13 @@ def evaluate_strategy_1_entry_cycle(
     3. Evaluate Path A.
     4. Update/evaluate Path B.
     5. Update/evaluate Path C.
-    6. Reject contradictory BUY/SELL entries.
-    7. Apply same-direction pathway priority.
-    8. Enforce position concurrency.
-    9. Read live account equity.
-    10. Choose pathway-specific EMA50 stop reference.
-    11. Size and execute the trade.
+    6. Evaluate Path D.
+    7. Reject contradictory BUY/SELL entries.
+    8. Apply same-direction pathway priority.
+    9. Enforce position concurrency.
+    10. Read live account equity.
+    11. Choose pathway-specific stop reference.
+    12. Size and execute the trade.
     """
 
     clean_symbol = (
@@ -665,10 +713,18 @@ def evaluate_strategy_1_entry_cycle(
     )
 
     # ---------------------------------------------------------
+    # PATH D - M1 TREND-CONTINUATION PULLBACK
+    # ---------------------------------------------------------
+    path_d_signals = _evaluate_path_d(
+        market=market,
+    )
+
+    # ---------------------------------------------------------
     # COLLECT ALL PATHWAY SIGNALS
     # ---------------------------------------------------------
     all_signals: list[Strategy1Signal] = [
         *path_a_signals,
+        *path_d_signals,
     ]
 
     if m1_evaluation is not None:
@@ -712,6 +768,17 @@ def evaluate_strategy_1_entry_cycle(
                     == SignalStatus.WAITING
                     and candidate.path
                     == Strategy1EntryPath.PATH_C_M5_CROSS
+                ):
+                    informative_signal = candidate
+                    break
+
+        if informative_signal is None:
+            for candidate in all_signals:
+                if (
+                    candidate.status
+                    == SignalStatus.WAITING
+                    and candidate.path
+                    == Strategy1EntryPath.PATH_D_M1_PULLBACK
                 ):
                     informative_signal = candidate
                     break
@@ -824,6 +891,30 @@ def evaluate_strategy_1_entry_cycle(
         )
     )
 
+    swing_stop_reference: float | None = None
+
+    if (
+        selected_signal.path
+        == Strategy1EntryPath.PATH_D_M1_PULLBACK
+        and selected_signal.path_d_contact_ema
+        == "EMA50"
+    ):
+        if (
+            selected_signal.direction
+            == SignalDirection.BUY
+        ):
+            swing_stop_reference = (
+                market.m1_recent_swing_low
+            )
+
+        elif (
+            selected_signal.direction
+            == SignalDirection.SELL
+        ):
+            swing_stop_reference = (
+                market.m1_recent_swing_high
+            )
+
     # ---------------------------------------------------------
     # TRADE OPENING
     # ---------------------------------------------------------
@@ -834,6 +925,7 @@ def evaluate_strategy_1_entry_cycle(
         stop_reference=stop_reference,
         symbol_info=market.symbol_info,
         tick=market.tick,
+        swing_stop_reference=swing_stop_reference,
     )
 
     # ---------------------------------------------------------

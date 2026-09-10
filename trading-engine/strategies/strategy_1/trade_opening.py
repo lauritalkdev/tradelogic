@@ -6,7 +6,7 @@ broker-valid MT5 market position.
 
 Responsibilities:
 - choose BUY Ask or SELL Bid as the intended entry price
-- calculate the pathway-specific EMA50-based stop-loss
+- calculate the pathway-specific stop-loss
 - calculate 5% account-equity position size
 - calculate the initial 3R take-profit
 - submit the MT5 market order
@@ -22,13 +22,27 @@ Path B:
 Path C:
     M5 EMA50
 
-Universal stop rule:
+Path D EMA21 contact:
+    M1 EMA50
+
+Path D EMA50 contact:
+    recent five-completed-M1-candle swing low/high
+
+Default EMA50 stop rule:
 
 BUY:
     relevant EMA50 - configured broker-point buffer
 
 SELL:
     relevant EMA50 + configured broker-point buffer
+
+Path D EMA50-contact swing rule:
+
+BUY:
+    recent M1 swing low - configured broker-point buffer
+
+SELL:
+    recent M1 swing high + configured broker-point buffer
 
 This module does NOT:
 - decide whether a signal exists
@@ -139,6 +153,7 @@ def build_trade_plan(
     account_equity: float,
     stop_reference: Strategy1IndicatorSnapshot,
     symbol_info: MT5SymbolInfo,
+    swing_stop_reference: float | None = None,
     tick: MT5Tick,
 ) -> Strategy1TradePlan:
     """
@@ -150,14 +165,21 @@ def build_trade_plan(
         Path A -> M5
         Path B -> M1
         Path C -> M5
+        Path D EMA21 contact -> M1
+
+    For Path D EMA50 contact, swing_stop_reference must contain:
+        BUY  -> lowest low of the last 5 completed M1 candles
+        SELL -> highest high of the last 5 completed M1 candles
 
     BUY:
         intended entry = current Ask
-        SL = relevant EMA50 - configured broker-point buffer
+        default SL = relevant EMA50 - configured broker-point buffer
+        swing SL   = recent M1 swing low - configured buffer
 
     SELL:
         intended entry = current Bid
-        SL = relevant EMA50 + configured broker-point buffer
+        default SL = relevant EMA50 + configured broker-point buffer
+        swing SL   = recent M1 swing high + configured buffer
 
     Position size is calculated so the original stop represents
     approximately 5% of account equity.
@@ -187,6 +209,14 @@ def build_trade_plan(
             "EMA50 stop-loss reference must be greater than zero."
         )
 
+    if (
+        swing_stop_reference is not None
+        and swing_stop_reference <= 0
+    ):
+        raise Strategy1TradeOpeningError(
+            "Swing stop-loss reference must be greater than zero."
+        )
+
     point_buffer = (
         STRATEGY_1.stop_loss_buffer_points
         * symbol_info.point
@@ -198,14 +228,20 @@ def build_trade_plan(
     if direction == OrderDirection.BUY:
         intended_entry = tick.ask
 
+        stop_base = (
+            swing_stop_reference
+            if swing_stop_reference is not None
+            else stop_reference.ema50
+        )
+
         stop_loss = (
-            stop_reference.ema50
+            stop_base
             - point_buffer
         )
 
         if stop_loss >= intended_entry:
             raise Strategy1TradeOpeningError(
-                "Invalid BUY setup: pathway EMA50-based stop-loss "
+                "Invalid BUY setup: pathway stop-loss "
                 "is not below the intended entry price."
             )
 
@@ -219,14 +255,20 @@ def build_trade_plan(
     elif direction == OrderDirection.SELL:
         intended_entry = tick.bid
 
+        stop_base = (
+            swing_stop_reference
+            if swing_stop_reference is not None
+            else stop_reference.ema50
+        )
+
         stop_loss = (
-            stop_reference.ema50
+            stop_base
             + point_buffer
         )
 
         if stop_loss <= intended_entry:
             raise Strategy1TradeOpeningError(
-                "Invalid SELL setup: pathway EMA50-based stop-loss "
+                "Invalid SELL setup: pathway stop-loss "
                 "is not above the intended entry price."
             )
 
@@ -347,6 +389,7 @@ def open_strategy_1_trade(
     stop_reference: Strategy1IndicatorSnapshot,
     symbol_info: MT5SymbolInfo,
     tick: MT5Tick,
+    swing_stop_reference: float | None = None,
 ) -> Strategy1OpenedTrade:
     """
     Build and immediately execute a Strategy 1 market order.
@@ -357,6 +400,10 @@ def open_strategy_1_trade(
         Path A -> M5 snapshot
         Path B -> M1 snapshot
         Path C -> M5 snapshot
+        Path D EMA21 contact -> M1 snapshot
+
+    For a Path D EMA50 contact, swing_stop_reference must contain
+    the appropriate recent completed-M1 swing low/high.
 
     This function must only be called AFTER:
     - Strategy 1 returned ENTRY
@@ -375,6 +422,7 @@ def open_strategy_1_trade(
         stop_reference=stop_reference,
         symbol_info=symbol_info,
         tick=tick,
+        swing_stop_reference=swing_stop_reference,
     )
 
     execution = open_market_position(

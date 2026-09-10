@@ -1,7 +1,7 @@
 """
 TradeLogic - Strategy 1 Signal Engine
 
-Implements the three independent Strategy 1 entry pathways.
+Implements the four independent Strategy 1 entry pathways.
 
 PATH A
 ------
@@ -47,6 +47,24 @@ PATH C
 Same independent cross-retest logic as Path B, but on M5.
 Setup expires after 10 completed M5 candles.
 
+PATH D
+------
+Independent M1 trend-continuation pullback.
+
+BUY:
+    EMA21 > EMA50 > EMA200
+    EMA21 is rising versus the previous completed M1 candle
+    live Ask reaches the EMA21 or EMA50 contact zone
+
+SELL:
+    EMA21 < EMA50 < EMA200
+    EMA21 is falling versus the previous completed M1 candle
+    live Bid reaches the EMA21 or EMA50 contact zone
+
+Path D does not use MACD and does not require a multi-candle
+trend-persistence counter. EMA21 contact has priority over EMA50
+when both contact zones could qualify.
+
 Cross state exists only in worker runtime memory. It is deliberately
 not reconstructed after a worker restart.
 """
@@ -78,6 +96,7 @@ class Strategy1EntryPath(str, Enum):
     PATH_A = "path_a"
     PATH_B_M1_CROSS = "path_b_m1_cross"
     PATH_C_M5_CROSS = "path_c_m5_cross"
+    PATH_D_M1_PULLBACK = "path_d_m1_pullback"
 
 
 @dataclass(frozen=True)
@@ -101,6 +120,10 @@ class Strategy1Signal:
 
     retest_lower: float | None = None
     retest_upper: float | None = None
+
+    # Path D only: identifies whether the live pullback contacted
+    # M1 EMA21 or M1 EMA50. Existing Paths A/B/C leave this as None.
+    path_d_contact_ema: str | None = None
 
 
 @dataclass(frozen=True)
@@ -484,6 +507,199 @@ def evaluate_path_a_signal(
         stop_loss_timeframe="M5",
     )
 
+
+
+def evaluate_path_d_signal(
+    *,
+    m1: Strategy1IndicatorSnapshot,
+    current_price: float,
+    point: float,
+    direction: SignalDirection,
+) -> Strategy1Signal:
+    """
+    Evaluate Strategy 1 Path D.
+
+    Path D is intentionally simple and independent.
+
+    BUY:
+        M1 EMA21 > EMA50 > EMA200
+        EMA21 is rising versus the previous completed M1 candle
+        live Ask is inside the EMA21 or EMA50 contact zone
+
+    SELL:
+        M1 EMA21 < EMA50 < EMA200
+        EMA21 is falling versus the previous completed M1 candle
+        live Bid is inside the EMA21 or EMA50 contact zone
+
+    No MACD confirmation is used.
+    No five-candle persistence requirement is used.
+
+    EMA21 contact is checked before EMA50 contact.
+    """
+
+    _validate_market_inputs(
+        current_price=current_price,
+        point=point,
+    )
+
+    contact_distance = (
+        STRATEGY_1.path_d_contact_zone_points
+        * point
+    )
+
+    ema21_lower = m1.ema21 - contact_distance
+    ema21_upper = m1.ema21 + contact_distance
+
+    ema50_lower = m1.ema50 - contact_distance
+    ema50_upper = m1.ema50 + contact_distance
+
+    if direction == SignalDirection.BUY:
+        setup_valid = (
+            m1.ema21 > m1.ema50 > m1.ema200
+            and m1.ema21 > m1.previous_ema21
+        )
+
+        if not setup_valid:
+            return Strategy1Signal(
+                direction=SignalDirection.BUY,
+                status=SignalStatus.NO_SETUP,
+                path=Strategy1EntryPath.PATH_D_M1_PULLBACK,
+                reason=(
+                    "Path D BUY conditions are not currently valid."
+                ),
+                current_price=current_price,
+                ema21=m1.ema21,
+                ema50=m1.ema50,
+                ema200=m1.ema200,
+                stop_loss_timeframe="M1",
+            )
+
+        if ema21_lower <= current_price <= ema21_upper:
+            return Strategy1Signal(
+                direction=SignalDirection.BUY,
+                status=SignalStatus.ENTRY,
+                path=Strategy1EntryPath.PATH_D_M1_PULLBACK,
+                reason=(
+                    "Path D BUY entry: live Ask contacted the "
+                    "M1 EMA21 pullback zone."
+                ),
+                current_price=current_price,
+                ema21=m1.ema21,
+                ema50=m1.ema50,
+                ema200=m1.ema200,
+                stop_loss_timeframe="M1",
+                entry_threshold=m1.ema21,
+                path_d_contact_ema="EMA21",
+            )
+
+        if ema50_lower <= current_price <= ema50_upper:
+            return Strategy1Signal(
+                direction=SignalDirection.BUY,
+                status=SignalStatus.ENTRY,
+                path=Strategy1EntryPath.PATH_D_M1_PULLBACK,
+                reason=(
+                    "Path D BUY entry: live Ask contacted the "
+                    "M1 EMA50 pullback zone."
+                ),
+                current_price=current_price,
+                ema21=m1.ema21,
+                ema50=m1.ema50,
+                ema200=m1.ema200,
+                stop_loss_timeframe="M1",
+                entry_threshold=m1.ema50,
+                path_d_contact_ema="EMA50",
+            )
+
+        return Strategy1Signal(
+            direction=SignalDirection.BUY,
+            status=SignalStatus.WAITING,
+            path=Strategy1EntryPath.PATH_D_M1_PULLBACK,
+            reason=(
+                "Path D BUY trend is valid. Waiting for live Ask "
+                "to contact M1 EMA21 or EMA50."
+            ),
+            current_price=current_price,
+            ema21=m1.ema21,
+            ema50=m1.ema50,
+            ema200=m1.ema200,
+            stop_loss_timeframe="M1",
+        )
+
+    if direction == SignalDirection.SELL:
+        setup_valid = (
+            m1.ema21 < m1.ema50 < m1.ema200
+            and m1.ema21 < m1.previous_ema21
+        )
+
+        if not setup_valid:
+            return Strategy1Signal(
+                direction=SignalDirection.SELL,
+                status=SignalStatus.NO_SETUP,
+                path=Strategy1EntryPath.PATH_D_M1_PULLBACK,
+                reason=(
+                    "Path D SELL conditions are not currently valid."
+                ),
+                current_price=current_price,
+                ema21=m1.ema21,
+                ema50=m1.ema50,
+                ema200=m1.ema200,
+                stop_loss_timeframe="M1",
+            )
+
+        if ema21_lower <= current_price <= ema21_upper:
+            return Strategy1Signal(
+                direction=SignalDirection.SELL,
+                status=SignalStatus.ENTRY,
+                path=Strategy1EntryPath.PATH_D_M1_PULLBACK,
+                reason=(
+                    "Path D SELL entry: live Bid contacted the "
+                    "M1 EMA21 pullback zone."
+                ),
+                current_price=current_price,
+                ema21=m1.ema21,
+                ema50=m1.ema50,
+                ema200=m1.ema200,
+                stop_loss_timeframe="M1",
+                entry_threshold=m1.ema21,
+                path_d_contact_ema="EMA21",
+            )
+
+        if ema50_lower <= current_price <= ema50_upper:
+            return Strategy1Signal(
+                direction=SignalDirection.SELL,
+                status=SignalStatus.ENTRY,
+                path=Strategy1EntryPath.PATH_D_M1_PULLBACK,
+                reason=(
+                    "Path D SELL entry: live Bid contacted the "
+                    "M1 EMA50 pullback zone."
+                ),
+                current_price=current_price,
+                ema21=m1.ema21,
+                ema50=m1.ema50,
+                ema200=m1.ema200,
+                stop_loss_timeframe="M1",
+                entry_threshold=m1.ema50,
+                path_d_contact_ema="EMA50",
+            )
+
+        return Strategy1Signal(
+            direction=SignalDirection.SELL,
+            status=SignalStatus.WAITING,
+            path=Strategy1EntryPath.PATH_D_M1_PULLBACK,
+            reason=(
+                "Path D SELL trend is valid. Waiting for live Bid "
+                "to contact M1 EMA21 or EMA50."
+            ),
+            current_price=current_price,
+            ema21=m1.ema21,
+            ema50=m1.ema50,
+            ema200=m1.ema200,
+            stop_loss_timeframe="M1",
+        )
+
+    raise ValueError(
+        "Path D direction must be BUY or SELL."
+    )
 
 def _confirmed_cross_direction(
     snapshot: Strategy1IndicatorSnapshot,

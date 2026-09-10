@@ -25,6 +25,11 @@ Path C:
 - M5 EMA21 / EMA200 completed-candle cross
 - wait for live-price retest
 
+Path D:
+- M1 EMA21 / EMA50 trend-continuation pullback
+- recent five completed M1 candle high/low values are exposed
+  for the deeper EMA50-entry stop-loss reference
+
 The completed-candle timestamps are exposed so the worker can age
 pending cross/retest setups by actual completed candles rather than
 by worker polling cycles.
@@ -90,6 +95,11 @@ class Strategy1MarketSnapshot:
 
     point: float
 
+    # Path D EMA50-entry stop reference.
+    # These values come from the most recent five COMPLETED M1 candles.
+    m1_recent_swing_low: float
+    m1_recent_swing_high: float
+
 
 def _close_prices(
     candles: list,
@@ -122,6 +132,11 @@ def build_strategy_1_market_snapshot(
 
     M1:
         independent cross/retest Path B
+        trend-continuation pullback Path D
+
+        Path D also uses the lowest low / highest high from the
+        most recent five completed M1 candles when an EMA50
+        contact requires a swing-based stop-loss reference.
 
     M5:
         normal Path-A execution
@@ -176,6 +191,18 @@ def build_strategy_1_market_snapshot(
             _close_prices(
                 m1_candles
             )
+        )
+
+        recent_m1_candles = m1_candles[-5:]
+
+        m1_recent_swing_low = min(
+            float(candle.low)
+            for candle in recent_m1_candles
+        )
+
+        m1_recent_swing_high = max(
+            float(candle.high)
+            for candle in recent_m1_candles
         )
 
         # ---------------------------------------------------------
@@ -247,4 +274,7 @@ def build_strategy_1_market_snapshot(
         sell_price=tick.bid,
 
         point=symbol_info.point,
+
+        m1_recent_swing_low=m1_recent_swing_low,
+        m1_recent_swing_high=m1_recent_swing_high,
     )
