@@ -67,6 +67,7 @@ from indicators.technical import Strategy1IndicatorSnapshot
 from mt5.market import (
     MT5SymbolInfo,
     MT5Tick,
+    resolve_mt5_symbol,
 )
 from positions.manager import (
     PositionDirection,
@@ -199,9 +200,22 @@ def build_trade_plan(
             "Account equity must be greater than zero."
         )
 
-    if symbol_info.symbol != clean_symbol:
+    broker_symbol = resolve_mt5_symbol(
+        clean_symbol
+    )
+
+    if symbol_info.symbol != broker_symbol:
         raise Strategy1TradeOpeningError(
-            "Symbol information does not match the requested symbol."
+            f"Symbol information '{symbol_info.symbol}' does not match "
+            f"resolved broker symbol '{broker_symbol}' for "
+            f"'{clean_symbol}'."
+        )
+
+    if tick.symbol != broker_symbol:
+        raise Strategy1TradeOpeningError(
+            f"Live tick symbol '{tick.symbol}' does not match "
+            f"resolved broker symbol '{broker_symbol}' for "
+            f"'{clean_symbol}'."
         )
 
     if stop_reference.ema50 <= 0:
