@@ -975,9 +975,6 @@ def _process_bot_cycle(
                     bot=bot,
                     remaining_positions=0,
                 )
-                session_manager.disconnect(
-                    expected_broker_account_id=broker.id
-                )
                 return
 
     if bot.subscription_id is None:
@@ -1021,17 +1018,11 @@ def _process_bot_cycle(
     )
 
     if _bot_wants_stop(bot):
-        stopped = _stop_bot_if_flat(
+        _stop_bot_if_flat(
             repository=repository,
             bot=bot,
             remaining_positions=remaining_positions,
         )
-
-        if stopped:
-            session_manager.disconnect(
-                expected_broker_account_id=broker.id
-            )
-
         return
 
     if not subscription_allowed:
@@ -1267,15 +1258,6 @@ def run_worker_forever(
                             f"[TradeLogic worker] Broker command error: {exc}",
                             flush=True,
                         )
-                    finally:
-                        try:
-                            manager.disconnect(
-                                expected_broker_account_id=pending_broker.id
-                            )
-                        except Exception:
-                            pass
-                else:
-                    manager.disconnect()
 
                 time.sleep(
                     worker_settings.poll_interval_seconds
